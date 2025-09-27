@@ -159,6 +159,16 @@ def scrape_foodlion():
         # also drop to a file so we can view later if needed
         (DATA_DIR / "foodlion_error.txt").write_text(err, encoding="utf-8")
         return {"ok": False, "error": err}, 500
+@app.get("/debug/import_foodlion")
+def debug_import_foodlion():
+    import traceback, importlib
+    try:
+        mod = importlib.import_module("scrapers.foodlion")
+        # basic sanity checks on expected symbols
+        has_async = hasattr(mod, "run_and_save_async")
+        return {"ok": True, "module": str(mod), "has_run_and_save_async": has_async}
+    except Exception:
+        return {"ok": False, "error": traceback.format_exc()}, 500
 
 
 @app.get("/routes")

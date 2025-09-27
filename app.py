@@ -404,7 +404,7 @@ def scrape_freshmarket():
             }
             """)
 
-            // Save artifacts for inspection
+            #Save artifacts for inspection
             html = await page.content()
             from pathlib import Path
             DATA_DIR.mkdir(parents=True, exist_ok=True)

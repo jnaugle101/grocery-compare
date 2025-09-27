@@ -161,13 +161,12 @@ def list_data_files():
     except Exception as e:
         return {"ok": False, "error": str(e)}, 500
 
-
-# ---------- Scrape Food Lion (force-snapshot for inspection) ----------
+# ---------- Scrape Food Lion (save HTML + parsed JSON) ----------
 @app.route("/scrape/foodlion", methods=["POST", "GET"])
 def scrape_foodlion():
-    import os, glob, traceback
+    import os, glob, json, traceback
     from playwright.async_api import async_playwright
-    from scrapers.foodlion import AD_URL
+    from scrapers.foodlion import AD_URL, OUT_PATH, _extract_deals_from_html
 
     def find_chromium_executable():
         for base in ("/opt/render/project/src/.playwright", "/opt/render/.cache/ms-playwright"):
@@ -176,7 +175,7 @@ def scrape_foodlion():
                 return hits[-1]
         return None
 
-    async def run_and_debug():
+    async def run_and_save_both():
         chromium_path = find_chromium_executable()
         if not chromium_path:
             return {"ok": False, "error": "Chromium not found on server."}
@@ -192,7 +191,7 @@ def scrape_foodlion():
             page = await ctx.new_page()
             await page.goto(AD_URL, wait_until="networkidle", timeout=45000)
 
-            # Nudge lazy-loaded content a bit
+            # Nudge lazy-loaded content
             await page.evaluate("window.scrollTo(0, document.body.scrollHeight)")
             await page.wait_for_timeout(1200)
 
@@ -200,17 +199,32 @@ def scrape_foodlion():
             await ctx.close()
             await browser.close()
 
-        # Always write a stable filename so /debug/foodlion works
-        snap = DATA_DIR / "debug_foodlion.html"
-        snap.write_text(html, encoding="utf-8")
-        return {"ok": True, "debug_html": str(snap)}
+        # Save HTML snapshot
+        DATA_DIR.mkdir(parents=True, exist_ok=True)
+        debug_path = DATA_DIR / "debug_foodlion.html"
+        debug_path.write_text(html, encoding="utf-8")
+
+        # Parse & save deals JSON
+        items = _extract_deals_from_html(html)
+        OUT_PATH.parent.mkdir(parents=True, exist_ok=True)
+        with OUT_PATH.open("w", encoding="utf-8") as f:
+            json.dump(items, f, ensure_ascii=False, indent=2)
+
+        return {
+            "ok": True,
+            "saved_items": len(items),
+            "saved_html": str(debug_path),
+            "saved_json": str(OUT_PATH),
+        }
 
     try:
-        return asyncio.run(run_and_debug()), 200
+        import asyncio
+        return asyncio.run(run_and_save_both()), 200
     except Exception:
         err = traceback.format_exc()
         (DATA_DIR / "foodlion_error.txt").write_text(err, encoding="utf-8")
         return {"ok": False, "error": err}, 500
+
 
 @app.route("/scrape/freshmarket", methods=["POST", "GET"])
 def scrape_freshmarket():

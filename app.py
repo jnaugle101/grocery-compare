@@ -12,6 +12,14 @@ def load_json(path: Path):
     with path.open("r", encoding="utf-8") as f:
         return json.load(f)
 
+def _find_chromium_executable():
+    import os, glob
+    for base in ("/opt/render/project/src/.playwright", "/opt/render/.cache/ms-playwright"):
+        hits = sorted(glob.glob(os.path.join(base, "chromium-*", "chrome-linux", "chrome")))
+        if hits:
+            return hits[-1]
+    return None
+
 
 # ---------- Debug: view latest saved Food Lion HTML ----------
 @app.get("/debug/foodlion")
@@ -19,6 +27,14 @@ def debug_foodlion_page():
     debug_path = DATA_DIR / "debug_foodlion.html"
     if not debug_path.exists():
         return {"ok": False, "error": "No debug HTML found yet. Run /scrape/foodlion first."}, 404
+    html = debug_path.read_text(encoding="utf-8", errors="ignore")
+    return Response(html, mimetype="text/html")
+
+@app.get("/debug/freshmarket")
+def debug_freshmarket_page():
+    debug_path = DATA_DIR / "debug_freshmarket.html"
+    if not debug_path.exists():
+        return {"ok": False, "error": "No Fresh Market debug HTML yet. Run /scrape/freshmarket first."}, 404
     html = debug_path.read_text(encoding="utf-8", errors="ignore")
     return Response(html, mimetype="text/html")
 

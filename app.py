@@ -220,12 +220,9 @@ def scrape_foodlion():
         return {"ok": False, "error": err}, 500
 
 
-# in app.py, reuse your existing /scrape/freshmarket route but
-# change the navigation & add a forced snapshot on errors
-
 @app.route("/scrape/freshmarket", methods=["POST", "GET"])
 def scrape_freshmarket():
-    import traceback
+    import traceback, json
     from playwright.async_api import async_playwright
     from scrapers.freshmarket import AD_URL, OUT_PATH, _extract_deals_from_html
 
@@ -235,6 +232,8 @@ def scrape_freshmarket():
             return {"ok": False, "error": "Chromium not found on server."}
 
         html = ""
+        js_items = []
+
         async with async_playwright() as p:
             browser = await p.chromium.launch(
                 headless=True,
@@ -255,32 +254,187 @@ def scrape_freshmarket():
             page = await ctx.new_page()
             page.set_default_timeout(60000)
 
-            # IMPORTANT: don't wait for "networkidle" here; many marketing sites keep connections open.
+            # Don’t use networkidle; these sites keep sockets open.
             await page.goto(AD_URL, wait_until="domcontentloaded", timeout=60000)
 
-            # Try to wait for something that looks like a product tile OR just scroll & snapshot
+            # Try dismissing cookie banners / modals commonly used on TFM
+            for sel in [
+                '#onetrust-accept-btn-handler',          # OneTrust
+                'button:has-text("Accept")',
+                'button:has-text("Allow All")',
+                'button:has-text("I Agree")',
+                '[aria-label="Accept"]',
+            ]:
+                try:
+                    await page.locator(sel).first.click(timeout=1500)
+                    break
+                except Exception:
+                    pass
+
+            # Close any promo/video modal if present
+            for sel in [
+                '[aria-label="Close"]',
+                'button[aria-label="Close"]',
+                'button:has-text("Close")',
+                '.modal [data-dismiss="modal"]',
+                '.mfp-close',  # Magnific Popup
+            ]:
+                try:
+                    await page.locator(sel).first.click(timeout=1500)
+                    break
+                except Exception:
+                    pass
+
+            # Small wait for content to settle
             try:
-                await page.wait_for_selector("text=$", timeout=4000)  # any visible price text
+                await page.wait_for_timeout(800)
             except Exception:
                 pass
 
-            # Nudge lazy content
+            # Incremental scroll to trigger lazy sections
             try:
-                await page.evaluate("window.scrollTo(0, document.body.scrollHeight)")
+                await page.evaluate("""
+                    const sleep = (ms)=>new Promise(r=>setTimeout(r,ms));
+                    (async () => {
+                      for (let y=0; y<=document.body.scrollHeight; y+=800) {
+                        window.scrollTo(0, y);
+                        await sleep(200);
+                      }
+                      window.scrollTo(0, document.body.scrollHeight);
+                    })();
+                """)
                 await page.wait_for_timeout(1200)
             except Exception:
                 pass
 
+            # In-page extraction: try multiple structures before falling back to regex-only
+            js_items = await page.evaluate(r"""
+            () => {
+              const items = [];
+
+              const clean = s => (s || '')
+                .replace(/\s+/g, ' ')
+                .replace(/\u00A0/g, ' ')   // nbsp
+                .trim();
+
+              const firstMoney = (txt) => {
+                const m = (txt || '').match(/\$\s*\d+(?:\.\d{1,2})?/);
+                return m ? parseFloat(m[0].replace(/[^0-9.]/g,'')) : null;
+              };
+
+              const sizeFrom = (txt) => {
+                const hints = ['per lb','per-lb','lb','oz','dozen','each','ea','ct','pk','pack'];
+                const t = (txt || '').toLowerCase();
+                for (const h of hints) if (t.includes(h)) return h.replace('-','-');
+                return '';
+              };
+
+              // Strategy A: obvious product/feature tiles
+              const cardSelectors = [
+                // generic card patterns
+                'article, li, .card, .c-card, .product, .product-card, .tile, .teaser, .feature, .grid__item',
+                // TFM often uses BEM-ish classes
+                '[class*="feature"] [class*="card"], [class*="weekly"] [class*="card"]'
+              ];
+              const cards = new Set();
+              for (const sel of cardSelectors) {
+                document.querySelectorAll(sel).forEach(n => cards.add(n));
+              }
+
+              const pushIfValid = (title, price, contextText) => {
+                const item = clean(title);
+                const p = typeof price === 'number' ? price : firstMoney(contextText);
+                if (!item || item.length < 3 || !isFinite(p)) return;
+                items.push({
+                  item: item.slice(0, 120),
+                  price: p,
+                  size_text: sizeFrom(contextText || item)
+                });
+              };
+
+              // Try to pick title + price for each card-ish container
+              for (const card of cards) {
+                const text = clean(card.textContent || '');
+                if (!/\$\s*\d/.test(text)) continue;
+
+                let titleEl = card.querySelector('h1,h2,h3,h4,.title,.card__title,.product__title,.teaser__title,strong');
+                let title = titleEl ? titleEl.textContent : text.split('$', 1)[0];
+
+                pushIfValid(title, null, text);
+              }
+
+              // Strategy B: any visible node that *is* a price + look upward for a title-ish sibling
+              const priceNodes = Array.from(document.querySelectorAll('[class*="price"], .price, [data-price]'));
+              for (const n of priceNodes) {
+                const price = firstMoney(n.textContent);
+                if (!isFinite(price)) continue;
+
+                // climb up to find a reasonable container
+                let container = n;
+                for (let i=0; i<4 && container && container.parentElement; i++) {
+                  container = container.parentElement;
+                  const titleEl = container.querySelector('h1,h2,h3,h4,.title,.card__title,.product__title,.teaser__title,strong');
+                  if (titleEl) {
+                    pushIfValid(titleEl.textContent, price, container.textContent);
+                    break;
+                  }
+                }
+              }
+
+              // Strategy C: as last resort, scan big sections for $ and take the nearest heading above it
+              if (items.length < 2) {
+                const blocks = Array.from(document.querySelectorAll('section, .section, .content, main, .container'));
+                for (const b of blocks) {
+                  const text = clean(b.textContent || '');
+                  if (!/\$\s*\d/.test(text)) continue;
+
+                  let titleEl = b.querySelector('h2,h3,h4,strong,.title');
+                  pushIfValid(titleEl ? titleEl.textContent : text.split('$',1)[0], null, text);
+                }
+              }
+
+              // de-dup by (title+price)
+              const seen = new Set();
+              return items.filter(x => {
+                const key = x.item.toLowerCase() + '|' + x.price;
+                if (seen.has(key)) return false;
+                seen.add(key);
+                return true;
+              });
+            }
+            """)
+
+            // Save artifacts for inspection
             html = await page.content()
+            from pathlib import Path
+            DATA_DIR.mkdir(parents=True, exist_ok=True)
+            (DATA_DIR / "debug_freshmarket.html").write_text(html or "", encoding="utf-8")
+            await page.screenshot(path=str(DATA_DIR / "debug_freshmarket.png"), full_page=True)
+
             await ctx.close()
             await browser.close()
 
-        # Always write a snapshot so /debug/freshmarket is useful
-        DATA_DIR.mkdir(parents=True, exist_ok=True)
-        debug_path = DATA_DIR / "debug_freshmarket.html"
-        debug_path.write_text(html or "", encoding="utf-8")
+        # Prefer JS-extracted items; fallback to soup if still empty
+        if js_items and len(js_items) > 0:
+            from datetime import datetime, timedelta
+            now = datetime.utcnow()
+            items = [{
+                "store_id": "fresh-market-24503",
+                "item": i["item"],
+                "size_text": i.get("size_text") or "",
+                "price": float(i["price"]),
+                "unit_qty": None,
+                "unit": None,
+                "start_date": now.date().isoformat(),
+                "end_date": (now + timedelta(days=7)).date().isoformat(),
+                "promo_text": "Weekly Features",
+                "source": AD_URL,
+                "fetched_at": now.isoformat() + "Z",
+            } for i in js_items]
+        else:
+            items = _extract_deals_from_html(html or "")
 
-        items = _extract_deals_from_html(html or "")
+        # Save JSON
         OUT_PATH.parent.mkdir(parents=True, exist_ok=True)
         with OUT_PATH.open("w", encoding="utf-8") as f:
             json.dump(items, f, ensure_ascii=False, indent=2)
@@ -288,7 +442,9 @@ def scrape_freshmarket():
         return {
             "ok": True,
             "saved_items": len(items),
-            "saved_html": str(debug_path),
+            "js_extracted": bool(js_items),
+            "saved_html": str(DATA_DIR / "debug_freshmarket.html"),
+            "saved_png": str(DATA_DIR / "debug_freshmarket.png"),
             "saved_json": str(OUT_PATH),
         }
 
@@ -297,8 +453,9 @@ def scrape_freshmarket():
     except Exception:
         err = traceback.format_exc()
         (DATA_DIR / "freshmarket_error.txt").write_text(err, encoding="utf-8")
-        # Even on exception, try to indicate if a snapshot exists
         return {"ok": False, "error": err}, 500
+
+
 
 # ---------- Routes list ----------
 @app.get("/routes")

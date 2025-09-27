@@ -1,0 +1,29 @@
+[
+  {
+    "id": "food-lion-4925-boonsboro",
+    "name": "Food Lion",
+    "address": "4925 Boonsboro Rd, Lynchburg, VA 24503",
+    "zip": "24503",
+    "lat": 37.4437,
+    "lon": -79.2137,
+    "chain": "Food Lion"
+  },
+  {
+    "id": "kroger-4119-boonsboro",
+    "name": "Kroger",
+    "address": "4119 Boonsboro Rd, Lynchburg, VA 24503",
+    "zip": "24503",
+    "lat": 37.4389,
+    "lon": -79.2103,
+    "chain": "Kroger"
+  },
+  {
+    "id": "fl-market",
+    "name": "F & L Market",
+    "address": "2517 Memorial Ave, Lynchburg, VA 24501",
+    "zip": "24501",
+    "lat": 37.4092,
+    "lon": -79.1678,
+    "chain": "Independent"
+  }
+]

@@ -1,0 +1,24 @@
+[
+  {
+    "store_id": "food-lion-4925-boonsboro",
+    "item": "Boneless Skinless Chicken Breast",
+    "size_text": "per lb",
+    "price": 1.99,
+    "unit_qty": 1.0,
+    "unit": "lb",
+    "start_date": "2025-09-24",
+    "end_date": "2025-09-30",
+    "promo_text": "Weekly special"
+  },
+  {
+    "store_id": "kroger-4119-boonsboro",
+    "item": "Large Eggs",
+    "size_text": "dozen",
+    "price": 2.29,
+    "unit_qty": 12,
+    "unit": "ct",
+    "start_date": "2025-09-24",
+    "end_date": "2025-09-30",
+    "promo_text": "Digital coupon price"
+  }
+]

@@ -1,26 +1,37 @@
 # scrapers/foodlion.py
 import re
 import json
-import time
 from pathlib import Path
 from datetime import datetime, timedelta
-import requests
-from bs4 import BeautifulSoup
+import time
 
-HEADERS = {
-    "User-Agent": "Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36 "
-                  "(KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36",
-    "Accept-Language": "en-US,en;q=0.9",
-}
+import requests
+from requests.adapters import HTTPAdapter, Retry
+from bs4 import BeautifulSoup
 
 AD_URL = "https://www.foodlion.com/savings/weekly-ad/grid-view"
 OUT_PATH = Path(__file__).resolve().parents[1] / "data" / "deals_foodlion.json"
 
+HEADERS = {
+    "User-Agent": (
+        "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) "
+        "AppleWebKit/537.36 (KHTML, like Gecko) "
+        "Chrome/120.0.0.0 Safari/537.36"
+    ),
+    "Accept": "text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8",
+    "Accept-Language": "en-US,en;q=0.9",
+    "Referer": "https://www.foodlion.com/",
+    "Connection": "keep-alive",
+}
+
+def _session():
+    s = requests.Session()
+    retries = Retry(total=3, backoff_factor=0.8, status_forcelist=[403, 429, 500, 502, 503, 504])
+    s.mount("https://", HTTPAdapter(max_retries=retries))
+    s.headers.update(HEADERS)
+    return s
+
 def _parse_price(text: str):
-    """
-    Parse prices like '$1.99', '1.99', '$5', etc.
-    Returns float or None.
-    """
     if not text:
         return None
     m = re.search(r"\$?\s*([0-9]+(?:\.[0-9]{1,2})?)", text.replace(",", ""))
@@ -28,18 +39,16 @@ def _parse_price(text: str):
 
 def fetch_foodlion_deals() -> list:
     """
-    Very first-pass HTML parser for Food Lion weekly ad grid.
-    NOTE: Sites change. This targets commonly found classes/text on the grid.
-    If the page is JS-heavy, you may need Playwright later.
+    First-pass HTML parser. If the page is JS-rendered or blocks bots by IP,
+    this may still fail on Render. In that case, move to Playwright.
     """
-    resp = requests.get(AD_URL, headers=HEADERS, timeout=20)
+    s = _session()
+    resp = s.get(AD_URL, timeout=20)
     resp.raise_for_status()
     html = resp.text
     soup = BeautifulSoup(html, "lxml")
 
     deals = []
-    # Heuristics: look for cards that contain both a name/description and a price
-    # Common patterns: product title in <h3>/<h4>/<div>, price in elements with '$'
     product_cards = soup.find_all(["article", "div", "li"], recursive=True)
 
     for card in product_cards:
@@ -47,13 +56,10 @@ def fetch_foodlion_deals() -> list:
         if "$" not in text:
             continue
 
-        # Try to split name vs price heuristically
         price = _parse_price(text)
         if not price:
             continue
 
-        # Guess item name as the first non-price phrase up to ~80 chars
-        # You can refine by restricting to specific child tags/classes if needed.
         name_candidate = None
         for tag in card.find_all(["h2", "h3", "h4", "p", "div"], recursive=True):
             t = tag.get_text(" ", strip=True)
@@ -61,12 +67,10 @@ def fetch_foodlion_deals() -> list:
                 name_candidate = t
                 break
         if not name_candidate:
-            # fallback: first words before the $ sign
             name_candidate = text.split("$", 1)[0].strip()
             if len(name_candidate) < 3:
                 continue
 
-        # Try to find unit/size hints
         size_text = None
         for unit_hint in ["per lb", "lb", "oz", "dozen", "each", "ea", "ct", "pk", "pack"]:
             if re.search(rf"\b{unit_hint}\b", text, re.I):
@@ -74,11 +78,11 @@ def fetch_foodlion_deals() -> list:
                 break
 
         deals.append({
-            "store_id": "food-lion-24503",   # generic for MVP
+            "store_id": "food-lion-24503",
             "item": name_candidate[:120],
             "size_text": size_text or "",
             "price": price,
-            "unit_qty": None,                # normalize later
+            "unit_qty": None,
             "unit": None,
             "start_date": (datetime.utcnow()).date().isoformat(),
             "end_date": (datetime.utcnow() + timedelta(days=7)).date().isoformat(),
@@ -87,7 +91,7 @@ def fetch_foodlion_deals() -> list:
             "fetched_at": datetime.utcnow().isoformat() + "Z",
         })
 
-    # de-dup by item name + price (simple MVP)
+    # de-dup
     seen = set()
     unique = []
     for d in deals:
@@ -98,10 +102,20 @@ def fetch_foodlion_deals() -> list:
     return unique
 
 def run_and_save() -> int:
-    items = fetch_foodlion_deals()
+    try:
+        items = fetch_foodlion_deals()
+    except requests.HTTPError as e:
+        # Log and return 0 so your API endpoint still returns JSON
+        print(f"[foodlion] HTTPError: {e}")
+        items = []
+    except Exception as e:
+        print(f"[foodlion] Error: {e}")
+        items = []
+
     OUT_PATH.parent.mkdir(parents=True, exist_ok=True)
     with OUT_PATH.open("w", encoding="utf-8") as f:
         json.dump(items, f, ensure_ascii=False, indent=2)
+    print(f"[foodlion] Saved {len(items)} items -> {OUT_PATH}")
     return len(items)
 
 if __name__ == "__main__":

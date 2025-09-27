@@ -42,30 +42,6 @@ def debug_playwright():
         return {"ok": True, "html_len": html_len}
     except Exception as e:
         return {"ok": False, "where": "run", "error": str(e)}, 500
-@app.get("/debug/playwright")
-def debug_playwright():
-    import asyncio
-    try:
-        from playwright.async_api import async_playwright
-    except Exception as e:
-        return {"ok": False, "where": "import", "error": str(e)}, 500
-
-    async def probe():
-        async with async_playwright() as p:
-            browser = await p.chromium.launch(headless=True)
-            ctx = await browser.new_context()
-            page = await ctx.new_page()
-            await page.goto("https://example.com", timeout=15000)
-            html = await page.content()
-            await ctx.close()
-            await browser.close()
-            return len(html)
-
-    try:
-        html_len = asyncio.run(probe())
-        return {"ok": True, "html_len": html_len}
-    except Exception as e:
-        return {"ok": False, "where": "run", "error": str(e)}, 500
 
 @app.get("/health")
 def health():

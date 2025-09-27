@@ -93,6 +93,16 @@ def compare():
         "estimated_total": round(total_cost, 2),
         "by_store": store_breakdown
     })
+@app.get("/debug/files")
+def list_data_files():
+    try:
+        files = []
+        if DATA_DIR.exists():
+            for p in sorted(DATA_DIR.glob("*")):
+                files.append({"name": p.name, "size": p.stat().st_size})
+        return jsonify({"dir": str(DATA_DIR), "files": files})
+    except Exception as e:
+        return {"ok": False, "error": str(e)}, 500
 
 # --- TEMP: manual scrape trigger for Food Lion (async) ---
 @app.route("/scrape/foodlion", methods=["POST", "GET"])

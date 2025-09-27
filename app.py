@@ -3,6 +3,19 @@ from pathlib import Path
 from flask import Flask, jsonify, request
 from utils.normalize import compute_unit_price
 
+# at top:
+import asyncio
+
+# replace existing scrape route with this:
+@app.route("/scrape/foodlion", methods=["POST", "GET"])
+def scrape_foodlion():
+    try:
+        from scrapers.foodlion import run_and_save_async
+        saved = asyncio.run(run_and_save_async())  # blocks this request, fine for MVP
+        return {"ok": True, "saved": saved}, 200
+    except Exception as e:
+        return {"ok": False, "error": str(e)}, 500
+
 app = Flask(__name__)
 
 DATA_DIR = Path(__file__).parent / "data"

@@ -3,10 +3,8 @@ import re
 import json
 from pathlib import Path
 from datetime import datetime, timedelta
-import asyncio
-
 from bs4 import BeautifulSoup
-from playwright.sync_api import sync_playwright
+from playwright.async_api import async_playwright
 
 AD_URL = "https://www.foodlion.com/savings/weekly-ad/grid-view"
 OUT_PATH = Path(__file__).resolve().parents[1] / "data" / "deals_foodlion.json"
@@ -20,10 +18,8 @@ def _parse_price(text: str):
 def _extract_deals_from_html(html: str) -> list:
     soup = BeautifulSoup(html, "lxml")
     deals = []
-
-    # Heuristic scan: any block containing a $ plus some non-$ text
-    # You can tighten this later with real selectors once you inspect the DOM.
     cards = soup.find_all(["article", "div", "li"], recursive=True)
+
     for card in cards:
         text = " ".join(card.get_text(" ", strip=True).split())
         if "$" not in text:
@@ -73,42 +69,32 @@ def _extract_deals_from_html(html: str) -> list:
             unique.append(d)
     return unique
 
-def fetch_foodlion_deals() -> list:
-    # Headless Chromium render
-    with sync_playwright() as p:
-        browser = p.chromium.launch(headless=True)
-        context = browser.new_context(
+async def fetch_foodlion_deals_async() -> list:
+    async with async_playwright() as p:
+        browser = await p.chromium.launch(headless=True)
+        context = await browser.new_context(
             user_agent=("Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) "
                         "AppleWebKit/537.36 (KHTML, like Gecko) "
-                        "Chrome/120.0.0.0 Safari/537.36)"),
+                        "Chrome/120.0.0.0 Safari/537.36"),
             locale="en-US",
         )
-        page = context.new_page()
-        page.goto(AD_URL, wait_until="networkidle", timeout=45000)
-
-        # Try a small scroll to trigger lazy content
-        page.evaluate("window.scrollTo(0, document.body.scrollHeight)")
-        page.wait_for_timeout(1500)
-        html = page.content()
-
-        context.close()
-        browser.close()
-
+        page = await context.new_page()
+        await page.goto(AD_URL, wait_until="networkidle", timeout=45000)
+        await page.evaluate("window.scrollTo(0, document.body.scrollHeight)")
+        await page.wait_for_timeout(1500)
+        html = await page.content()
+        await context.close()
+        await browser.close()
     return _extract_deals_from_html(html)
 
-def run_and_save() -> int:
+async def run_and_save_async() -> int:
     try:
-        items = fetch_foodlion_deals()
+        items = await fetch_foodlion_deals_async()
     except Exception as e:
         print(f"[foodlion] Error: {e}")
         items = []
-
     OUT_PATH.parent.mkdir(parents=True, exist_ok=True)
     with OUT_PATH.open("w", encoding="utf-8") as f:
         json.dump(items, f, ensure_ascii=False, indent=2)
     print(f"[foodlion] Saved {len(items)} items -> {OUT_PATH}")
     return len(items)
-
-if __name__ == "__main__":
-    n = run_and_save()
-    print(f"Saved {n} Food Lion deals -> {OUT_PATH}")

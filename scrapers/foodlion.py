@@ -6,10 +6,19 @@ from datetime import datetime, timedelta
 from bs4 import BeautifulSoup
 from playwright.async_api import async_playwright, TimeoutError as PWTimeout
 from flask import Response
+# at top with other imports
+import os, glob
 
 AD_URL = "https://www.foodlion.com/savings/weekly-ad/grid-view"
 OUT_PATH = Path(__file__).resolve().parents[1] / "data" / "deals_foodlion.json"
 ZIP = "24503"
+# add this helper near the top
+def _find_chromium():
+    for base in ("/opt/render/project/src/.playwright", "/opt/render/.cache/ms-playwright"):
+        matches = sorted(glob.glob(os.path.join(base, "chromium-*", "chrome-linux", "chrome")))
+        if matches:
+            return matches[-1]
+    return None
 
 def _parse_price(text: str):
     if not text:
@@ -136,15 +145,20 @@ async def _set_zip_and_select_store(page):
     await page.wait_for_load_state("networkidle", timeout=15000)
     await page.wait_for_timeout(1500)
 
-async def fetch_foodlion_deals_async() -> list:
+aasync def fetch_foodlion_deals_async() -> list:
     async with async_playwright() as p:
-        browser = await p.chromium.launch(headless=True)
+        chromium_path = _find_chromium()
+        browser = await p.chromium.launch(
+            headless=True,
+            executable_path=chromium_path  # <— add this
+        )
         context = await browser.new_context(
             user_agent=("Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) "
                         "AppleWebKit/537.36 (KHTML, like Gecko) "
                         "Chrome/120.0.0.0 Safari/537.36"),
             locale="en-US",
         )
+        ...
         page = await context.new_page()
         await page.goto(AD_URL, wait_until="networkidle", timeout=45000)
 

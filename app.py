@@ -91,6 +91,10 @@ def deals():
     fl_path = DATA_DIR / "deals_foodlion.json"
     if fl_path.exists():
         merged.extend(load_json(fl_path))
+    # fresh market scraped deals
+    fm_path = DATA_DIR / "deals_freshmarket.json"
+    if fm_path.exists():
+        merged.extend(load_json(fm_path))
 
     for d in merged:
         qty = d.get("unit_qty")
@@ -208,6 +212,14 @@ def scrape_foodlion():
         (DATA_DIR / "foodlion_error.txt").write_text(err, encoding="utf-8")
         return {"ok": False, "error": err}, 500
 
+@app.route("/scrape/freshmarket", methods=["POST", "GET"])
+def scrape_freshmarket():
+    try:
+        from scrapers.freshmarket import run_and_save
+        saved = run_and_save()
+        return {"ok": True, "saved": saved}, 200
+    except Exception as e:
+        return {"ok": False, "error": str(e)}, 500
 
 # ---------- Debug: import probe for the scraper ----------
 @app.get("/debug/import_foodlion")

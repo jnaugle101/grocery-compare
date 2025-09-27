@@ -1,4 +1,4 @@
-printf "python-3.11.9\n" > runtime.txt
+echo "python-3.11.9" > runtime.txt
 git add runtime.txt
-git commit -m "Pin Python runtime to 3.11.9 for Playwright/greenlet compatibility"
+git commit -m "Pin Python to 3.11.9 for Render"
 git push origin main

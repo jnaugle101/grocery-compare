@@ -20,26 +20,44 @@ def debug_foodlion_page():
     return Response(html, mimetype="text/html")
 @app.get("/debug/playwright")
 def debug_playwright():
-    import asyncio
+    import asyncio, os, glob
+
+    # Prefer the path we used during build; fall back to default cache.
+    PW_DIRS = [
+        "/opt/render/project/src/.playwright",   # where we installed in Build Command
+        "/opt/render/.cache/ms-playwright",      # default cache path
+    ]
+
+    def find_chromium_executable():
+        for base in PW_DIRS:
+            candidates = sorted(glob.glob(os.path.join(base, "chromium-*", "chrome-linux", "chrome")))
+            if candidates:
+                return candidates[-1]  # newest
+        return None
+
     try:
         from playwright.async_api import async_playwright
     except Exception as e:
         return {"ok": False, "where": "import", "error": str(e)}, 500
 
     async def probe():
+        chromium_path = find_chromium_executable()
+        if not chromium_path:
+            return {"ok": False, "where": "resolve", "error": "Chromium not found in expected paths."}
+
         async with async_playwright() as p:
-            browser = await p.chromium.launch(headless=True)
+            browser = await p.chromium.launch(headless=True, executable_path=chromium_path)
             ctx = await browser.new_context()
             page = await ctx.new_page()
-            await page.goto("https://example.com", timeout=15000)
+            await page.goto("https://example.com", timeout=20000)
             html = await page.content()
             await ctx.close()
             await browser.close()
-            return len(html)
+            return {"ok": True, "html_len": len(html), "chromium_path": chromium_path}
 
     try:
-        html_len = asyncio.run(probe())
-        return {"ok": True, "html_len": html_len}
+        result = asyncio.run(probe())
+        return result if isinstance(result, dict) else {"ok": True, "result": result}
     except Exception as e:
         return {"ok": False, "where": "run", "error": str(e)}, 500
 

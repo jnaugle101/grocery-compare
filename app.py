@@ -3,6 +3,7 @@ from pathlib import Path
 from flask import Flask, jsonify, request
 from utils.normalize import compute_unit_price
 import asyncio
+from flask import Response
 
 app = Flask(__name__)
 DATA_DIR = Path(__file__).parent / "data"
@@ -10,6 +11,13 @@ DATA_DIR = Path(__file__).parent / "data"
 def load_json(path: Path):
     with path.open("r", encoding="utf-8") as f:
         return json.load(f)
+@app.get("/debug/foodlion")
+def debug_foodlion_page():
+    debug_path = DATA_DIR / "debug_foodlion.html"
+    if not debug_path.exists():
+        return {"ok": False, "error": "No debug HTML found yet. Run /scrape/foodlion first."}, 404
+    html = debug_path.read_text(encoding="utf-8", errors="ignore")
+    return Response(html, mimetype="text/html")
 
 @app.get("/health")
 def health():

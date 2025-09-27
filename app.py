@@ -1,16 +1,19 @@
 import json
 from pathlib import Path
-from flask import Flask, jsonify, request
+from flask import Flask, jsonify, request, Response
 from utils.normalize import compute_unit_price
 import asyncio
-from flask import Response
 
 app = Flask(__name__)
 DATA_DIR = Path(__file__).parent / "data"
 
+
 def load_json(path: Path):
     with path.open("r", encoding="utf-8") as f:
         return json.load(f)
+
+
+# ---------- Debug: view latest saved Food Lion HTML ----------
 @app.get("/debug/foodlion")
 def debug_foodlion_page():
     debug_path = DATA_DIR / "debug_foodlion.html"
@@ -18,27 +21,24 @@ def debug_foodlion_page():
         return {"ok": False, "error": "No debug HTML found yet. Run /scrape/foodlion first."}, 404
     html = debug_path.read_text(encoding="utf-8", errors="ignore")
     return Response(html, mimetype="text/html")
+
+
+# ---------- Debug: verify Playwright & Chromium ----------
 @app.get("/debug/playwright")
 def debug_playwright():
-    import asyncio, os, glob
-
-    # Prefer the path we used during build; fall back to default cache.
-    PW_DIRS = [
-        "/opt/render/project/src/.playwright",   # where we installed in Build Command
-        "/opt/render/.cache/ms-playwright",      # default cache path
-    ]
-
-    def find_chromium_executable():
-        for base in PW_DIRS:
-            candidates = sorted(glob.glob(os.path.join(base, "chromium-*", "chrome-linux", "chrome")))
-            if candidates:
-                return candidates[-1]  # newest
-        return None
-
+    import os, glob
     try:
         from playwright.async_api import async_playwright
     except Exception as e:
         return {"ok": False, "where": "import", "error": str(e)}, 500
+
+    def find_chromium_executable():
+        # Prefer build-installed path; fall back to default cache.
+        for base in ("/opt/render/project/src/.playwright", "/opt/render/.cache/ms-playwright"):
+            candidates = sorted(glob.glob(os.path.join(base, "chromium-*", "chrome-linux", "chrome")))
+            if candidates:
+                return candidates[-1]
+        return None
 
     async def probe():
         chromium_path = find_chromium_executable()
@@ -61,10 +61,14 @@ def debug_playwright():
     except Exception as e:
         return {"ok": False, "where": "run", "error": str(e)}, 500
 
+
+# ---------- Health ----------
 @app.get("/health")
 def health():
     return {"ok": True}
 
+
+# ---------- Stores ----------
 @app.get("/stores")
 def stores():
     """Return stores by zip (defaults to 24503)"""
@@ -72,6 +76,8 @@ def stores():
     stores = load_json(DATA_DIR / "stores_24503.json")
     return jsonify([s for s in stores if s["zip"] == zip_code or zip_code == "24503"])
 
+
+# ---------- Deals (sample + any scraped) ----------
 @app.get("/deals")
 def deals():
     """Return deals for zip (MVP: sample + any scraped files)"""
@@ -99,6 +105,8 @@ def deals():
 
     return jsonify(merged)
 
+
+# ---------- Compare ----------
 @app.get("/compare")
 def compare():
     """MVP: simple greedy compare by item substring."""
@@ -135,6 +143,9 @@ def compare():
         "estimated_total": round(total_cost, 2),
         "by_store": store_breakdown
     })
+
+
+# ---------- Debug: list files in /data ----------
 @app.get("/debug/files")
 def list_data_files():
     try:
@@ -146,34 +157,75 @@ def list_data_files():
     except Exception as e:
         return {"ok": False, "error": str(e)}, 500
 
-# --- TEMP: manual scrape trigger for Food Lion (async) ---
+
+# ---------- Scrape Food Lion (force-snapshot for inspection) ----------
 @app.route("/scrape/foodlion", methods=["POST", "GET"])
 def scrape_foodlion():
-    import traceback
-    from scrapers.foodlion import run_and_save_async
+    import os, glob, traceback
+    from playwright.async_api import async_playwright
+    from scrapers.foodlion import AD_URL
+
+    def find_chromium_executable():
+        for base in ("/opt/render/project/src/.playwright", "/opt/render/.cache/ms-playwright"):
+            hits = sorted(glob.glob(os.path.join(base, "chromium-*", "chrome-linux", "chrome")))
+            if hits:
+                return hits[-1]
+        return None
+
+    async def run_and_debug():
+        chromium_path = find_chromium_executable()
+        if not chromium_path:
+            return {"ok": False, "error": "Chromium not found on server."}
+
+        async with async_playwright() as p:
+            browser = await p.chromium.launch(headless=True, executable_path=chromium_path)
+            ctx = await browser.new_context(
+                user_agent=("Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) "
+                            "AppleWebKit/537.36 (KHTML, like Gecko) "
+                            "Chrome/120.0.0.0 Safari/537.36"),
+                locale="en-US",
+            )
+            page = await ctx.new_page()
+            await page.goto(AD_URL, wait_until="networkidle", timeout=45000)
+
+            # Nudge lazy-loaded content a bit
+            await page.evaluate("window.scrollTo(0, document.body.scrollHeight)")
+            await page.wait_for_timeout(1200)
+
+            html = await page.content()
+            await ctx.close()
+            await browser.close()
+
+        # Always write a stable filename so /debug/foodlion works
+        snap = DATA_DIR / "debug_foodlion.html"
+        snap.write_text(html, encoding="utf-8")
+        return {"ok": True, "debug_html": str(snap)}
+
     try:
-        saved = asyncio.run(run_and_save_async())
-        return {"ok": True, "saved": saved}, 200
+        return asyncio.run(run_and_debug()), 200
     except Exception:
         err = traceback.format_exc()
-        # also drop to a file so we can view later if needed
         (DATA_DIR / "foodlion_error.txt").write_text(err, encoding="utf-8")
         return {"ok": False, "error": err}, 500
+
+
+# ---------- Debug: import probe for the scraper ----------
 @app.get("/debug/import_foodlion")
 def debug_import_foodlion():
     import traceback, importlib
     try:
         mod = importlib.import_module("scrapers.foodlion")
-        # basic sanity checks on expected symbols
         has_async = hasattr(mod, "run_and_save_async")
         return {"ok": True, "module": str(mod), "has_run_and_save_async": has_async}
     except Exception:
         return {"ok": False, "error": traceback.format_exc()}, 500
 
 
+# ---------- Routes list ----------
 @app.get("/routes")
 def list_routes():
     return jsonify(sorted([str(r) for r in app.url_map.iter_rules()]))
+
 
 if __name__ == "__main__":
     app.run(debug=True)

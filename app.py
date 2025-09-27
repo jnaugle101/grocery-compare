@@ -220,7 +220,9 @@ def scrape_foodlion():
         return {"ok": False, "error": err}, 500
 
 
-# ---------- Scrape Fresh Market (save HTML + parsed JSON) ----------
+# in app.py, reuse your existing /scrape/freshmarket route but
+# change the navigation & add a forced snapshot on errors
+
 @app.route("/scrape/freshmarket", methods=["POST", "GET"])
 def scrape_freshmarket():
     import traceback
@@ -232,40 +234,71 @@ def scrape_freshmarket():
         if not chromium_path:
             return {"ok": False, "error": "Chromium not found on server."}
 
+        html = ""
         async with async_playwright() as p:
-            browser = await p.chromium.launch(headless=True, executable_path=chromium_path)
+            browser = await p.chromium.launch(
+                headless=True,
+                executable_path=chromium_path,
+                args=[
+                    "--disable-blink-features=AutomationControlled",
+                    "--no-sandbox",
+                    "--disable-dev-shm-usage",
+                ],
+            )
             ctx = await browser.new_context(
                 user_agent=("Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) "
                             "AppleWebKit/537.36 (KHTML, like Gecko) "
                             "Chrome/120.0.0.0 Safari/537.36"),
                 locale="en-US",
+                viewport={"width": 1366, "height": 900},
             )
             page = await ctx.new_page()
-            await page.goto(AD_URL, wait_until="networkidle", timeout=45000)
-            await page.evaluate("window.scrollTo(0, document.body.scrollHeight)")
-            await page.wait_for_timeout(1200)
+            page.set_default_timeout(60000)
+
+            # IMPORTANT: don't wait for "networkidle" here; many marketing sites keep connections open.
+            await page.goto(AD_URL, wait_until="domcontentloaded", timeout=60000)
+
+            # Try to wait for something that looks like a product tile OR just scroll & snapshot
+            try:
+                await page.wait_for_selector("text=$", timeout=4000)  # any visible price text
+            except Exception:
+                pass
+
+            # Nudge lazy content
+            try:
+                await page.evaluate("window.scrollTo(0, document.body.scrollHeight)")
+                await page.wait_for_timeout(1200)
+            except Exception:
+                pass
+
             html = await page.content()
             await ctx.close()
             await browser.close()
 
+        # Always write a snapshot so /debug/freshmarket is useful
         DATA_DIR.mkdir(parents=True, exist_ok=True)
         debug_path = DATA_DIR / "debug_freshmarket.html"
-        debug_path.write_text(html, encoding="utf-8")
+        debug_path.write_text(html or "", encoding="utf-8")
 
-        items = _extract_deals_from_html(html)
+        items = _extract_deals_from_html(html or "")
         OUT_PATH.parent.mkdir(parents=True, exist_ok=True)
         with OUT_PATH.open("w", encoding="utf-8") as f:
             json.dump(items, f, ensure_ascii=False, indent=2)
 
-        return {"ok": True, "saved_items": len(items), "saved_html": str(debug_path), "saved_json": str(OUT_PATH)}
+        return {
+            "ok": True,
+            "saved_items": len(items),
+            "saved_html": str(debug_path),
+            "saved_json": str(OUT_PATH),
+        }
 
     try:
         return asyncio.run(run_and_save_both()), 200
     except Exception:
         err = traceback.format_exc()
         (DATA_DIR / "freshmarket_error.txt").write_text(err, encoding="utf-8")
+        # Even on exception, try to indicate if a snapshot exists
         return {"ok": False, "error": err}, 500
-
 
 # ---------- Routes list ----------
 @app.get("/routes")

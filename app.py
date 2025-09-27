@@ -3,6 +3,7 @@ from pathlib import Path
 from flask import Flask, jsonify, request, Response
 from utils.normalize import compute_unit_price
 import asyncio
+import os, glob
 
 app = Flask(__name__)
 DATA_DIR = Path(__file__).parent / "data"
@@ -12,8 +13,9 @@ def load_json(path: Path):
     with path.open("r", encoding="utf-8") as f:
         return json.load(f)
 
+
 def _find_chromium_executable():
-    import os, glob
+    # Prefer build-installed path; fall back to default cache.
     for base in ("/opt/render/project/src/.playwright", "/opt/render/.cache/ms-playwright"):
         hits = sorted(glob.glob(os.path.join(base, "chromium-*", "chrome-linux", "chrome")))
         if hits:
@@ -30,6 +32,8 @@ def debug_foodlion_page():
     html = debug_path.read_text(encoding="utf-8", errors="ignore")
     return Response(html, mimetype="text/html")
 
+
+# ---------- Debug: view latest saved Fresh Market HTML ----------
 @app.get("/debug/freshmarket")
 def debug_freshmarket_page():
     debug_path = DATA_DIR / "debug_freshmarket.html"
@@ -42,22 +46,13 @@ def debug_freshmarket_page():
 # ---------- Debug: verify Playwright & Chromium ----------
 @app.get("/debug/playwright")
 def debug_playwright():
-    import os, glob
     try:
         from playwright.async_api import async_playwright
     except Exception as e:
         return {"ok": False, "where": "import", "error": str(e)}, 500
 
-    def find_chromium_executable():
-        # Prefer build-installed path; fall back to default cache.
-        for base in ("/opt/render/project/src/.playwright", "/opt/render/.cache/ms-playwright"):
-            candidates = sorted(glob.glob(os.path.join(base, "chromium-*", "chrome-linux", "chrome")))
-            if candidates:
-                return candidates[-1]
-        return None
-
     async def probe():
-        chromium_path = find_chromium_executable()
+        chromium_path = _find_chromium_executable()
         if not chromium_path:
             return {"ok": False, "where": "resolve", "error": "Chromium not found in expected paths."}
 
@@ -107,7 +102,7 @@ def deals():
     fl_path = DATA_DIR / "deals_foodlion.json"
     if fl_path.exists():
         merged.extend(load_json(fl_path))
-    # fresh market scraped deals
+
     fm_path = DATA_DIR / "deals_freshmarket.json"
     if fm_path.exists():
         merged.extend(load_json(fm_path))
@@ -177,22 +172,16 @@ def list_data_files():
     except Exception as e:
         return {"ok": False, "error": str(e)}, 500
 
+
 # ---------- Scrape Food Lion (save HTML + parsed JSON) ----------
 @app.route("/scrape/foodlion", methods=["POST", "GET"])
 def scrape_foodlion():
-    import os, glob, json, traceback
+    import traceback
     from playwright.async_api import async_playwright
     from scrapers.foodlion import AD_URL, OUT_PATH, _extract_deals_from_html
 
-    def find_chromium_executable():
-        for base in ("/opt/render/project/src/.playwright", "/opt/render/.cache/ms-playwright"):
-            hits = sorted(glob.glob(os.path.join(base, "chromium-*", "chrome-linux", "chrome")))
-            if hits:
-                return hits[-1]
-        return None
-
     async def run_and_save_both():
-        chromium_path = find_chromium_executable()
+        chromium_path = _find_chromium_executable()
         if not chromium_path:
             return {"ok": False, "error": "Chromium not found on server."}
 
@@ -206,35 +195,24 @@ def scrape_foodlion():
             )
             page = await ctx.new_page()
             await page.goto(AD_URL, wait_until="networkidle", timeout=45000)
-
-            # Nudge lazy-loaded content
             await page.evaluate("window.scrollTo(0, document.body.scrollHeight)")
             await page.wait_for_timeout(1200)
-
             html = await page.content()
             await ctx.close()
             await browser.close()
 
-        # Save HTML snapshot
         DATA_DIR.mkdir(parents=True, exist_ok=True)
         debug_path = DATA_DIR / "debug_foodlion.html"
         debug_path.write_text(html, encoding="utf-8")
 
-        # Parse & save deals JSON
         items = _extract_deals_from_html(html)
         OUT_PATH.parent.mkdir(parents=True, exist_ok=True)
         with OUT_PATH.open("w", encoding="utf-8") as f:
             json.dump(items, f, ensure_ascii=False, indent=2)
 
-        return {
-            "ok": True,
-            "saved_items": len(items),
-            "saved_html": str(debug_path),
-            "saved_json": str(OUT_PATH),
-        }
+        return {"ok": True, "saved_items": len(items), "saved_html": str(debug_path), "saved_json": str(OUT_PATH)}
 
     try:
-        import asyncio
         return asyncio.run(run_and_save_both()), 200
     except Exception:
         err = traceback.format_exc()
@@ -242,25 +220,51 @@ def scrape_foodlion():
         return {"ok": False, "error": err}, 500
 
 
+# ---------- Scrape Fresh Market (save HTML + parsed JSON) ----------
 @app.route("/scrape/freshmarket", methods=["POST", "GET"])
 def scrape_freshmarket():
-    try:
-        from scrapers.freshmarket import run_and_save
-        saved = run_and_save()
-        return {"ok": True, "saved": saved}, 200
-    except Exception as e:
-        return {"ok": False, "error": str(e)}, 500
+    import traceback
+    from playwright.async_api import async_playwright
+    from scrapers.freshmarket import AD_URL, OUT_PATH, _extract_deals_from_html
 
-# ---------- Debug: import probe for the scraper ----------
-@app.get("/debug/import_foodlion")
-def debug_import_foodlion():
-    import traceback, importlib
+    async def run_and_save_both():
+        chromium_path = _find_chromium_executable()
+        if not chromium_path:
+            return {"ok": False, "error": "Chromium not found on server."}
+
+        async with async_playwright() as p:
+            browser = await p.chromium.launch(headless=True, executable_path=chromium_path)
+            ctx = await browser.new_context(
+                user_agent=("Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) "
+                            "AppleWebKit/537.36 (KHTML, like Gecko) "
+                            "Chrome/120.0.0.0 Safari/537.36"),
+                locale="en-US",
+            )
+            page = await ctx.new_page()
+            await page.goto(AD_URL, wait_until="networkidle", timeout=45000)
+            await page.evaluate("window.scrollTo(0, document.body.scrollHeight)")
+            await page.wait_for_timeout(1200)
+            html = await page.content()
+            await ctx.close()
+            await browser.close()
+
+        DATA_DIR.mkdir(parents=True, exist_ok=True)
+        debug_path = DATA_DIR / "debug_freshmarket.html"
+        debug_path.write_text(html, encoding="utf-8")
+
+        items = _extract_deals_from_html(html)
+        OUT_PATH.parent.mkdir(parents=True, exist_ok=True)
+        with OUT_PATH.open("w", encoding="utf-8") as f:
+            json.dump(items, f, ensure_ascii=False, indent=2)
+
+        return {"ok": True, "saved_items": len(items), "saved_html": str(debug_path), "saved_json": str(OUT_PATH)}
+
     try:
-        mod = importlib.import_module("scrapers.foodlion")
-        has_async = hasattr(mod, "run_and_save_async")
-        return {"ok": True, "module": str(mod), "has_run_and_save_async": has_async}
+        return asyncio.run(run_and_save_both()), 200
     except Exception:
-        return {"ok": False, "error": traceback.format_exc()}, 500
+        err = traceback.format_exc()
+        (DATA_DIR / "freshmarket_error.txt").write_text(err, encoding="utf-8")
+        return {"ok": False, "error": err}, 500
 
 
 # ---------- Routes list ----------

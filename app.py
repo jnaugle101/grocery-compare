@@ -149,12 +149,17 @@ def list_data_files():
 # --- TEMP: manual scrape trigger for Food Lion (async) ---
 @app.route("/scrape/foodlion", methods=["POST", "GET"])
 def scrape_foodlion():
+    import traceback
     from scrapers.foodlion import run_and_save_async
     try:
         saved = asyncio.run(run_and_save_async())
         return {"ok": True, "saved": saved}, 200
-    except Exception as e:
-        return {"ok": False, "error": str(e)}, 500
+    except Exception:
+        err = traceback.format_exc()
+        # also drop to a file so we can view later if needed
+        (DATA_DIR / "foodlion_error.txt").write_text(err, encoding="utf-8")
+        return {"ok": False, "error": err}, 500
+
 
 @app.get("/routes")
 def list_routes():

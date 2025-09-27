@@ -6,12 +6,13 @@ from utils.normalize import compute_unit_price
 # at top:
 import asyncio
 
-# replace existing scrape route with this:
+import asyncio
+
 @app.route("/scrape/foodlion", methods=["POST", "GET"])
 def scrape_foodlion():
     try:
         from scrapers.foodlion import run_and_save_async
-        saved = asyncio.run(run_and_save_async())  # blocks this request, fine for MVP
+        saved = asyncio.run(run_and_save_async())
         return {"ok": True, "saved": saved}, 200
     except Exception as e:
         return {"ok": False, "error": str(e)}, 500

@@ -78,15 +78,6 @@ def compare():
             )[0]
             picks.append(best)
 
-    # --- TEMP: manual scrape trigger for Food Lion (for testing only) ---
-    @app.post("/scrape/foodlion")
-    def scrape_foodlion():
-        from scrapers.foodlion import run_and_save
-        try:
-            count = run_and_save()
-            return {"ok": True, "saved": count}
-        except Exception as e:
-            return {"ok": False, "error": str(e)}, 500
 
     total_cost = sum([p["price"] for p in picks]) if picks else 0.0
     store_breakdown = {}
@@ -102,6 +93,18 @@ def compare():
         "estimated_total": round(total_cost, 2),
         "by_store": store_breakdown
     })
+# --- TEMP: manual scrape trigger for Food Lion (testing only) ---
+@app.route("/scrape/foodlion", methods=["POST", "GET"])
+def scrape_foodlion():
+    from scrapers.foodlion import run_and_save
+    try:
+        saved = run_and_save()
+        return {"ok": True, "saved": saved}, 200
+    except Exception as e:
+        return {"ok": False, "error": str(e)}, 500
+
 
 if __name__ == "__main__":
     app.run(debug=True)
+
+

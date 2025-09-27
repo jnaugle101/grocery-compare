@@ -10,3 +10,5 @@ gunicorn==22.0.0
 gunicorn==22.0.0
 # requirements.txt (add these)
 playwright==1.47.0
+greenlet==3.0.3
+

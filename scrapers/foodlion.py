@@ -145,7 +145,7 @@ async def _set_zip_and_select_store(page):
     await page.wait_for_load_state("networkidle", timeout=15000)
     await page.wait_for_timeout(1500)
 
-aasync def fetch_foodlion_deals_async() -> list:
+async def fetch_foodlion_deals_async() -> list:
     async with async_playwright() as p:
         chromium_path = _find_chromium()
         browser = await p.chromium.launch(

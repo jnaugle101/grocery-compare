@@ -103,6 +103,9 @@ def scrape_foodlion():
     except Exception as e:
         return {"ok": False, "error": str(e)}, 500
 
+@app.get("/routes")
+def list_routes():
+    return jsonify(sorted([str(r) for r in app.url_map.iter_rules()]))
 
 if __name__ == "__main__":
     app.run(debug=True)

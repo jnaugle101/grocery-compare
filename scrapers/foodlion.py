@@ -5,6 +5,7 @@ from pathlib import Path
 from datetime import datetime, timedelta
 from bs4 import BeautifulSoup
 from playwright.async_api import async_playwright, TimeoutError as PWTimeout
+from flask import Response
 
 AD_URL = "https://www.foodlion.com/savings/weekly-ad/grid-view"
 OUT_PATH = Path(__file__).resolve().parents[1] / "data" / "deals_foodlion.json"
@@ -162,12 +163,49 @@ async def fetch_foodlion_deals_async() -> list:
         await browser.close()
     return _extract_deals_from_html(html)
 
+# scrapers/foodlion.py (only this function needs replacing)
 async def run_and_save_async() -> int:
+    debug_path = OUT_PATH.parent / "debug_foodlion.html"
     try:
         items = await fetch_foodlion_deals_async()
+        # Save last-rendered HTML for inspection if nothing parsed
+        # (fetch_foodlion_deals_async returns the HTML via internal call; adjust to return both if needed)
     except Exception as e:
         print(f"[foodlion] Error: {e}")
         items = []
+
+    # If you want to always keep a snapshot from the last run, change the scraper to return html too.
+    # Quick workaround: call the renderer again and save its content only for debugging:
+    try:
+        from playwright.async_api import async_playwright
+        async with async_playwright() as p:
+            browser = await p.chromium.launch(headless=True)
+            context = await browser.new_context(
+                user_agent=("Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) "
+                            "AppleWebKit/537.36 (KHTML, like Gecko) "
+                            "Chrome/120.0.0.0 Safari/537.36"),
+                locale="en-US",
+            )
+            page = await context.new_page()
+            await page.goto(AD_URL, wait_until="networkidle", timeout=45000)
+            # try to set ZIP/store again quickly (non-fatal if fails)
+            try:
+                await _set_zip_and_select_store(page)
+            except Exception as e:
+                print(f"[foodlion] ZIP/store setup warning (debug snapshot): {e}")
+            await page.evaluate("window.scrollTo(0, document.body.scrollHeight)")
+            await page.wait_for_timeout(800)
+            html = await page.content()
+            await context.close()
+            await browser.close()
+
+        debug_path.parent.mkdir(parents=True, exist_ok=True)
+        with debug_path.open("w", encoding="utf-8") as f:
+            f.write(html)
+        print(f"[foodlion] Wrote debug HTML -> {debug_path}")
+    except Exception as e:
+        print(f"[foodlion] Failed to write debug HTML: {e}")
+
     OUT_PATH.parent.mkdir(parents=True, exist_ok=True)
     with OUT_PATH.open("w", encoding="utf-8") as f:
         json.dump(items, f, ensure_ascii=False, indent=2)

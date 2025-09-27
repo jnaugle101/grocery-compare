@@ -2,23 +2,9 @@ import json
 from pathlib import Path
 from flask import Flask, jsonify, request
 from utils.normalize import compute_unit_price
-
-# at top:
 import asyncio
-
-import asyncio
-
-@app.route("/scrape/foodlion", methods=["POST", "GET"])
-def scrape_foodlion():
-    try:
-        from scrapers.foodlion import run_and_save_async
-        saved = asyncio.run(run_and_save_async())
-        return {"ok": True, "saved": saved}, 200
-    except Exception as e:
-        return {"ok": False, "error": str(e)}, 500
 
 app = Flask(__name__)
-
 DATA_DIR = Path(__file__).parent / "data"
 
 def load_json(path: Path):
@@ -34,7 +20,6 @@ def stores():
     """Return stores by zip (defaults to 24503)"""
     zip_code = request.args.get("zip", "24503")
     stores = load_json(DATA_DIR / "stores_24503.json")
-    # For MVP, we ignore other zips; later, filter by given zip or distance.
     return jsonify([s for s in stores if s["zip"] == zip_code or zip_code == "24503"])
 
 @app.get("/deals")
@@ -43,17 +28,14 @@ def deals():
     _ = request.args.get("zip", "24503")
     merged = []
 
-    # sample deals
     sample_path = DATA_DIR / "deals_sample_24503.json"
     if sample_path.exists():
         merged.extend(load_json(sample_path))
 
-    # food lion scraped deals
     fl_path = DATA_DIR / "deals_foodlion.json"
     if fl_path.exists():
         merged.extend(load_json(fl_path))
 
-    # compute unit_price if you like (simple if you have unit_qty)
     for d in merged:
         qty = d.get("unit_qty")
         price = d.get("price")
@@ -69,10 +51,7 @@ def deals():
 
 @app.get("/compare")
 def compare():
-    """
-    MVP: simple greedy compare by item substring.
-    Example: /compare?zip=24503&items=chicken,eggs
-    """
+    """MVP: simple greedy compare by item substring."""
     items_q = request.args.get("items", "")
     if not items_q:
         return jsonify({"error": "missing items param"}), 400
@@ -92,7 +71,6 @@ def compare():
             )[0]
             picks.append(best)
 
-
     total_cost = sum([p["price"] for p in picks]) if picks else 0.0
     store_breakdown = {}
     for p in picks:
@@ -107,12 +85,13 @@ def compare():
         "estimated_total": round(total_cost, 2),
         "by_store": store_breakdown
     })
-# --- TEMP: manual scrape trigger for Food Lion (testing only) ---
+
+# --- TEMP: manual scrape trigger for Food Lion (async) ---
 @app.route("/scrape/foodlion", methods=["POST", "GET"])
 def scrape_foodlion():
-    from scrapers.foodlion import run_and_save
+    from scrapers.foodlion import run_and_save_async
     try:
-        saved = run_and_save()
+        saved = asyncio.run(run_and_save_async())
         return {"ok": True, "saved": saved}, 200
     except Exception as e:
         return {"ok": False, "error": str(e)}, 500
@@ -123,5 +102,3 @@ def list_routes():
 
 if __name__ == "__main__":
     app.run(debug=True)
-
-

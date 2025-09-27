@@ -8,3 +8,5 @@ pint==0.24.4
 # requirements.txt (add)
 gunicorn==22.0.0
 gunicorn==22.0.0
+# requirements.txt (add these)
+playwright==1.47.0

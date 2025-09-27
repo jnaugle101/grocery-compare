@@ -3,33 +3,13 @@ import re
 import json
 from pathlib import Path
 from datetime import datetime, timedelta
-import time
+import asyncio
 
-import requests
-from requests.adapters import HTTPAdapter, Retry
 from bs4 import BeautifulSoup
+from playwright.sync_api import sync_playwright
 
 AD_URL = "https://www.foodlion.com/savings/weekly-ad/grid-view"
 OUT_PATH = Path(__file__).resolve().parents[1] / "data" / "deals_foodlion.json"
-
-HEADERS = {
-    "User-Agent": (
-        "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) "
-        "AppleWebKit/537.36 (KHTML, like Gecko) "
-        "Chrome/120.0.0.0 Safari/537.36"
-    ),
-    "Accept": "text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8",
-    "Accept-Language": "en-US,en;q=0.9",
-    "Referer": "https://www.foodlion.com/",
-    "Connection": "keep-alive",
-}
-
-def _session():
-    s = requests.Session()
-    retries = Retry(total=3, backoff_factor=0.8, status_forcelist=[403, 429, 500, 502, 503, 504])
-    s.mount("https://", HTTPAdapter(max_retries=retries))
-    s.headers.update(HEADERS)
-    return s
 
 def _parse_price(text: str):
     if not text:
@@ -37,25 +17,17 @@ def _parse_price(text: str):
     m = re.search(r"\$?\s*([0-9]+(?:\.[0-9]{1,2})?)", text.replace(",", ""))
     return float(m.group(1)) if m else None
 
-def fetch_foodlion_deals() -> list:
-    """
-    First-pass HTML parser. If the page is JS-rendered or blocks bots by IP,
-    this may still fail on Render. In that case, move to Playwright.
-    """
-    s = _session()
-    resp = s.get(AD_URL, timeout=20)
-    resp.raise_for_status()
-    html = resp.text
+def _extract_deals_from_html(html: str) -> list:
     soup = BeautifulSoup(html, "lxml")
-
     deals = []
-    product_cards = soup.find_all(["article", "div", "li"], recursive=True)
 
-    for card in product_cards:
+    # Heuristic scan: any block containing a $ plus some non-$ text
+    # You can tighten this later with real selectors once you inspect the DOM.
+    cards = soup.find_all(["article", "div", "li"], recursive=True)
+    for card in cards:
         text = " ".join(card.get_text(" ", strip=True).split())
         if "$" not in text:
             continue
-
         price = _parse_price(text)
         if not price:
             continue
@@ -84,7 +56,7 @@ def fetch_foodlion_deals() -> list:
             "price": price,
             "unit_qty": None,
             "unit": None,
-            "start_date": (datetime.utcnow()).date().isoformat(),
+            "start_date": datetime.utcnow().date().isoformat(),
             "end_date": (datetime.utcnow() + timedelta(days=7)).date().isoformat(),
             "promo_text": "Weekly Ad",
             "source": AD_URL,
@@ -101,13 +73,32 @@ def fetch_foodlion_deals() -> list:
             unique.append(d)
     return unique
 
+def fetch_foodlion_deals() -> list:
+    # Headless Chromium render
+    with sync_playwright() as p:
+        browser = p.chromium.launch(headless=True)
+        context = browser.new_context(
+            user_agent=("Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) "
+                        "AppleWebKit/537.36 (KHTML, like Gecko) "
+                        "Chrome/120.0.0.0 Safari/537.36)"),
+            locale="en-US",
+        )
+        page = context.new_page()
+        page.goto(AD_URL, wait_until="networkidle", timeout=45000)
+
+        # Try a small scroll to trigger lazy content
+        page.evaluate("window.scrollTo(0, document.body.scrollHeight)")
+        page.wait_for_timeout(1500)
+        html = page.content()
+
+        context.close()
+        browser.close()
+
+    return _extract_deals_from_html(html)
+
 def run_and_save() -> int:
     try:
         items = fetch_foodlion_deals()
-    except requests.HTTPError as e:
-        # Log and return 0 so your API endpoint still returns JSON
-        print(f"[foodlion] HTTPError: {e}")
-        items = []
     except Exception as e:
         print(f"[foodlion] Error: {e}")
         items = []

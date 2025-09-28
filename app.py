@@ -95,6 +95,47 @@ def debug_playwright():
     except Exception as e:
         return {"ok": False, "where": "run", "error": str(e)}, 500
 
+# Put this near your other routes, e.g. right after the helpers or debug routes.
+@app.get("/")
+def index():
+    html = """
+    <!doctype html>
+    <html>
+      <head>
+        <meta charset="utf-8"/>
+        <meta name="viewport" content="width=device-width, initial-scale=1"/>
+        <title>Grocery Compare</title>
+        <style>
+          body { font-family: system-ui, -apple-system, Segoe UI, Roboto, sans-serif; margin: 2rem; line-height: 1.5; }
+          h1 { margin-top: 0; }
+          code { background: #f3f3f3; padding: 2px 6px; border-radius: 4px; }
+          ul { padding-left: 1.25rem; }
+          li { margin: 0.3rem 0; }
+        </style>
+      </head>
+      <body>
+        <h1>Grocery Compare – API</h1>
+        <p>Service is running. Helpful links:</p>
+        <ul>
+          <li><a href="/health">/health</a></li>
+          <li><a href="/routes">/routes</a></li>
+          <li><a href="/deals">/deals</a></li>
+          <li><a href="/debug/freshmarket">/debug/freshmarket</a></li>
+          <li><a href="/debug/freshmarket.png">/debug/freshmarket.png</a></li>
+          <li><a href="/debug/freshmarket_captured">/debug/freshmarket_captured</a></li>
+          <li><a href="/debug/playwright">/debug/playwright</a></li>
+        </ul>
+        <p>To trigger scrapes:</p>
+        <ul>
+          <li><code>POST /scrape/foodlion</code></li>
+          <li><code>POST /scrape/freshmarket</code></li>
+        </ul>
+      </body>
+    </html>
+    """
+    return Response(html, mimetype="text/html")
+
+
 # -------------------- basics --------------------
 @app.get("/health")
 def health():

@@ -4,8 +4,10 @@ import glob
 import os
 import asyncio
 from pathlib import Path
+from datetime import datetime, timedelta
 
-from flask import Flask, jsonify, request, Response
+from flask import Flask, jsonify, request, Response, render_template_string
+from rapidfuzz import process, fuzz
 from utils.normalize import compute_unit_price
 
 app = Flask(__name__)
@@ -23,6 +25,75 @@ def _find_chromium_executable():
         if hits:
             return hits[-1]
     return None
+
+def _load_all_deals():
+    """
+    Merge all present deals files and compute unit_price when possible.
+    Includes walmart file if you add it later.
+    """
+    merged = []
+    for fname in ("deals_sample_24503.json", "deals_foodlion.json", "deals_freshmarket.json", "deals_walmart.json"):
+        p = DATA_DIR / fname
+        if p.exists() and p.stat().st_size > 0:
+            try:
+                merged.extend(load_json(p))
+            except Exception:
+                pass
+
+    for d in merged:
+        qty = d.get("unit_qty")
+        price = d.get("price")
+        try:
+            if qty and price and float(qty) > 0:
+                d["unit_price"] = round(float(price) / float(qty), 4)
+            else:
+                d.setdefault("unit_price", None)
+        except Exception:
+            d["unit_price"] = None
+    return merged
+
+# -------------------- index / simple landing --------------------
+@app.get("/")
+def index():
+    html = """
+    <!doctype html>
+    <html>
+      <head>
+        <meta charset="utf-8"/>
+        <meta name="viewport" content="width=device-width, initial-scale=1"/>
+        <title>Grocery Compare</title>
+        <style>
+          body { font-family: system-ui, -apple-system, Segoe UI, Roboto, sans-serif; margin: 2rem; line-height: 1.5; }
+          h1 { margin-top: 0; }
+          code { background: #f3f3f3; padding: 2px 6px; border-radius: 4px; }
+          ul { padding-left: 1.25rem; }
+          li { margin: 0.3rem 0; }
+        </style>
+      </head>
+      <body>
+        <h1>Grocery Compare – API</h1>
+        <p>Service is running. Helpful links:</p>
+        <ul>
+          <li><a href="/app">/app</a> (basic UI)</li>
+          <li><a href="/health">/health</a></li>
+          <li><a href="/routes">/routes</a></li>
+          <li><a href="/deals">/deals</a></li>
+          <li><a href="/search?q=eggs">/search?q=eggs</a></li>
+          <li><a href="/debug/freshmarket">/debug/freshmarket</a></li>
+          <li><a href="/debug/freshmarket.png">/debug/freshmarket.png</a></li>
+          <li><a href="/debug/freshmarket_captured">/debug/freshmarket_captured</a></li>
+          <li><a href="/debug/playwright">/debug/playwright</a></li>
+        </ul>
+        <p>To trigger scrapes:</p>
+        <ul>
+          <li><code>POST /scrape/foodlion</code></li>
+          <li><code>POST /scrape/freshmarket</code></li>
+          <!-- Add Walmart later: POST /scrape/walmart -->
+        </ul>
+      </body>
+    </html>
+    """
+    return Response(html, mimetype="text/html")
 
 # -------------------- debug: saved HTML views --------------------
 @app.get("/debug/foodlion")
@@ -95,47 +166,6 @@ def debug_playwright():
     except Exception as e:
         return {"ok": False, "where": "run", "error": str(e)}, 500
 
-# Put this near your other routes, e.g. right after the helpers or debug routes.
-@app.get("/")
-def index():
-    html = """
-    <!doctype html>
-    <html>
-      <head>
-        <meta charset="utf-8"/>
-        <meta name="viewport" content="width=device-width, initial-scale=1"/>
-        <title>Grocery Compare</title>
-        <style>
-          body { font-family: system-ui, -apple-system, Segoe UI, Roboto, sans-serif; margin: 2rem; line-height: 1.5; }
-          h1 { margin-top: 0; }
-          code { background: #f3f3f3; padding: 2px 6px; border-radius: 4px; }
-          ul { padding-left: 1.25rem; }
-          li { margin: 0.3rem 0; }
-        </style>
-      </head>
-      <body>
-        <h1>Grocery Compare – API</h1>
-        <p>Service is running. Helpful links:</p>
-        <ul>
-          <li><a href="/health">/health</a></li>
-          <li><a href="/routes">/routes</a></li>
-          <li><a href="/deals">/deals</a></li>
-          <li><a href="/debug/freshmarket">/debug/freshmarket</a></li>
-          <li><a href="/debug/freshmarket.png">/debug/freshmarket.png</a></li>
-          <li><a href="/debug/freshmarket_captured">/debug/freshmarket_captured</a></li>
-          <li><a href="/debug/playwright">/debug/playwright</a></li>
-        </ul>
-        <p>To trigger scrapes:</p>
-        <ul>
-          <li><code>POST /scrape/foodlion</code></li>
-          <li><code>POST /scrape/freshmarket</code></li>
-        </ul>
-      </body>
-    </html>
-    """
-    return Response(html, mimetype="text/html")
-
-
 # -------------------- basics --------------------
 @app.get("/health")
 def health():
@@ -156,53 +186,83 @@ def list_data_files():
     except Exception as e:
         return {"ok": False, "error": str(e)}, 500
 
-# -------------------- API: stores / deals / compare --------------------
+# -------------------- API: stores / deals / search / compare --------------------
 @app.get("/stores")
 def stores():
-    """Return stores by zip (defaults to 24503)"""
+    """Return stores by zip (defaults to 24503)."""
     zip_code = request.args.get("zip", "24503")
     stores = load_json(DATA_DIR / "stores_24503.json")
     return jsonify([s for s in stores if s["zip"] == zip_code or zip_code == "24503"])
 
 @app.get("/deals")
 def deals():
-    """Return deals (sample + any scraped files)"""
+    """Return all known deals (sample + any scraped files present)."""
     _ = request.args.get("zip", "24503")  # reserved for future filter
-    merged = []
+    return jsonify(_load_all_deals())
 
-    for fname in ("deals_sample_24503.json", "deals_foodlion.json", "deals_freshmarket.json"):
-        p = DATA_DIR / fname
-        if p.exists() and p.stat().st_size > 0:
-            merged.extend(load_json(p))
+@app.get("/search")
+def search_deals():
+    """
+    Fuzzy search across all current deals.
+    Params:
+      q     = query text (required)
+      store = optional store_id substring filter (e.g. 'food-lion' or 'walmart')
+      limit = max results (default 25)
+      min   = minimum fuzzy score (0-100, default 60)
+    """
+    q = (request.args.get("q") or "").strip()
+    if not q:
+        return jsonify({"error": "missing q"}), 400
 
-    for d in merged:
-        qty = d.get("unit_qty")
-        price = d.get("price")
-        try:
-            if qty and price and float(qty) > 0:
-                d["unit_price"] = round(float(price) / float(qty), 4)
-            else:
-                d["unit_price"] = None
-        except Exception:
-            d["unit_price"] = None
+    store_f = (request.args.get("store") or "").strip().lower()
+    limit = int(request.args.get("limit", 25))
+    minscore = int(request.args.get("min", 60))
 
-    return jsonify(merged)
+    deals_all = _load_all_deals()
+    if store_f:
+        deals_all = [d for d in deals_all if store_f in (d.get("store_id") or "").lower()]
+
+    choices = [(d.get("item", ""), i) for i, d in enumerate(deals_all)]
+    ranked = process.extract(
+        q,
+        choices,
+        scorer=fuzz.WRatio,
+        score_cutoff=minscore,
+        limit=limit
+    )
+    hits = []
+    for score, (_label, idx) in ranked:
+        d = deals_all[idx].copy()
+        d["_score"] = score
+        hits.append(d)
+    return jsonify({"q": q, "results": hits, "count": len(hits)})
 
 @app.get("/compare")
 def compare():
-    """MVP: simple greedy compare by item substring."""
+    """
+    Compare cheapest matches per requested item (by substring match in item name).
+    Params:
+      items = comma-separated item names (required)
+      store = optional store_id substring filter (e.g. 'food-lion', 'fresh-market', 'walmart')
+    """
     items_q = request.args.get("items", "")
     if not items_q:
         return jsonify({"error": "missing items param"}), 400
     wanted = [x.strip().lower() for x in items_q.split(",") if x.strip()]
 
-    deals = load_json(DATA_DIR / "deals_sample_24503.json")
-    for d in deals:
-        d["unit_price"] = compute_unit_price(d.get("price"), d.get("unit_qty"))
+    store_f = (request.args.get("store") or "").strip().lower()
+    deals_all = _load_all_deals()
+    if store_f:
+        deals_all = [d for d in deals_all if store_f in (d.get("store_id") or "").lower()]
+
+    # compute unit_price if not present
+    for d in deals_all:
+        if d.get("unit_price") is None:
+            d["unit_price"] = compute_unit_price(d.get("price"), d.get("unit_qty"))
 
     picks = []
     for w in wanted:
-        candidates = [d for d in deals if w in d["item"].lower()]
+        candidates = [d for d in deals_all if w in (d.get("item", "").lower())]
         if candidates:
             best = sorted(
                 candidates,
@@ -213,9 +273,10 @@ def compare():
     total_cost = sum([p["price"] for p in picks]) if picks else 0.0
     store_breakdown = {}
     for p in picks:
-        store_breakdown.setdefault(p["store_id"], {"items": [], "subtotal": 0.0})
-        store_breakdown[p["store_id"]]["items"].append(p["item"])
-        store_breakdown[p["store_id"]]["subtotal"] += p["price"]
+        sid = p["store_id"]
+        store_breakdown.setdefault(sid, {"items": [], "subtotal": 0.0})
+        store_breakdown[sid]["items"].append(p["item"])
+        store_breakdown[sid]["subtotal"] += p["price"]
 
     return jsonify({
         "requested_items": wanted,
@@ -361,7 +422,6 @@ def scrape_freshmarket():
             await ctx.close(); await browser.close()
 
         # ---------- Extraction pipeline ----------
-        from datetime import datetime, timedelta
         now = datetime.utcnow()
 
         def _parse_money_any(val):
@@ -555,9 +615,7 @@ def scrape_freshmarket():
         (DATA_DIR / "freshmarket_error.txt").write_text(err, encoding="utf-8")
         return {"ok": False, "error": err}, 500
 
-# -------------------- simple UI --------------------
-from flask import render_template_string
-
+# -------------------- simple UI (/app) --------------------
 @app.get("/app")
 def app_ui():
     return render_template_string("""
@@ -582,22 +640,22 @@ def app_ui():
     th, td { padding:10px; border-bottom:1px solid #223068; text-align:left; }
     th { background:#15204b; position:sticky; top:0; }
     .tag { font-size: 12px; color:#a9b4ff; background:#182353; border:1px solid #2a3f8b; padding:2px 8px; border-radius: 999px; }
-    .grid2 { display:grid; grid-template-columns: 1fr 340px; gap:16px; }
+    .grid2 { display:grid; grid-template-columns: 1fr 360px; gap:16px; }
     @media (max-width: 900px){ .grid2 { grid-template-columns: 1fr; } }
     .small { font-size:12px; color:#b8c1ff; }
-    .ok { color:#8ef5b2; }
-    .warn { color:#ffd27c; }
-    .err { color:#ff9ba1; }
     .mono { font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace; font-size: 12px; }
+    .ok { color:#8ef5b2; }
+    .err { color:#ff9ba1; }
   </style>
 </head>
 <body>
   <div class="wrap">
     <h1>Grocery Compare – UI</h1>
-    <div class="muted">Enter items (comma-separated), then Compare. You can also view scraped deals.</div>
+    <div class="muted">Build a list and compare. You can also search deals and add items to the list.</div>
 
     <div class="grid2">
       <div>
+        <!-- Compare card -->
         <div class="card">
           <div class="row">
             <input id="items" type="text" placeholder="e.g. chicken breast, eggs, milk, bananas" />
@@ -608,6 +666,18 @@ def app_ui():
           <div id="compareResults" style="margin-top:10px; overflow:auto; max-height: 50vh;"></div>
         </div>
 
+        <!-- Search & add-to-compare card -->
+        <div class="card">
+          <div class="row">
+            <input id="store" type="text" placeholder="store filter (optional): e.g. walmart, food-lion" />
+            <input id="searchBox" type="text" placeholder="Search deals… e.g. yogurt" />
+            <button id="btnSearch">Search</button>
+          </div>
+          <div id="searchStatus" class="small" style="margin-top:8px;"></div>
+          <div id="searchResults" style="margin-top:10px; overflow:auto; max-height: 50vh;"></div>
+        </div>
+
+        <!-- Raw deals viewer -->
         <div class="card">
           <div class="row">
             <button id="btnDeals">Load Deals</button>
@@ -719,6 +789,32 @@ function renderDeals(list){
     </div>`;
 }
 
+function renderSearch(list){
+  if (!Array.isArray(list) || list.length === 0){
+    return '<div class="muted">No results.</div>';
+  }
+  const rows = list.map(d => `
+    <tr>
+      <td>${d.item}</td>
+      <td class="mono">${d.store_id}</td>
+      <td class="mono">$${(d.price ?? '').toFixed ? d.price.toFixed(2) : d.price}</td>
+      <td class="mono">${d.size_text || ''}</td>
+      <td class="mono">${d.unit_qty ?? ''} ${d.unit ?? ''}</td>
+      <td class="mono">${d.unit_price != null ? '$' + Number(d.unit_price).toFixed(4) : ''}</td>
+      <td><a href="#" data-name="${encodeURIComponent(d.item)}" class="addLink">Add</a></td>
+    </tr>
+  `).join('');
+  return `
+    <div style="overflow:auto; max-height: 44vh;">
+      <table>
+        <thead>
+          <tr><th>Item</th><th>Store</th><th>Price</th><th>Size</th><th>Unit</th><th>Unit Price</th><th></th></tr>
+        </thead>
+        <tbody>${rows}</tbody>
+      </table>
+    </div>`;
+}
+
 el('btnSample').addEventListener('click', () => {
   el('items').value = 'chicken breast, eggs, milk, bananas';
   el('items').focus();
@@ -752,12 +848,39 @@ el('btnDeals').addEventListener('click', async () => {
   }
 });
 
+el('btnSearch').addEventListener('click', async () => {
+  const q = (el('searchBox').value || '').trim();
+  const store = (el('store').value || '').trim();
+  if (!q){ el('searchStatus').textContent = 'Enter a search term.'; return; }
+  el('searchStatus').textContent = 'Searching…';
+  el('searchResults').innerHTML = '';
+  try {
+    const url = '/search?q=' + encodeURIComponent(q) + (store ? '&store=' + encodeURIComponent(store) : '');
+    const r = await fetch(url);
+    const j = await r.json();
+    el('searchStatus').textContent = 'Found ' + (j.count || 0);
+    el('searchResults').innerHTML = renderSearch(j.results || []);
+    // Attach add-to-compare
+    Array.from(document.querySelectorAll('.addLink')).forEach(a => {
+      a.addEventListener('click', (ev) => {
+        ev.preventDefault();
+        const name = decodeURIComponent(a.getAttribute('data-name') || '');
+        if (!name) return;
+        const cur = (el('items').value || '').trim();
+        el('items').value = cur ? (cur + ', ' + name) : name;
+        el('items').focus();
+      });
+    });
+  } catch (e){
+    el('searchStatus').textContent = 'Error: ' + e;
+  }
+});
+
 checkHealth();
 </script>
 </body>
 </html>
 """)
-
 
 # -------------------- main --------------------
 if __name__ == "__main__":

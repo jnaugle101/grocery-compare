@@ -208,9 +208,11 @@ def scrape_foodlion():
         return {"ok": False, "error": err}, 500
 
 # -------------------- scrape: Fresh Market --------------------
+# --- paste over your existing /scrape/freshmarket route in app.py ---
+
 @app.route("/scrape/freshmarket", methods=["POST", "GET"])
 def scrape_freshmarket():
-    import traceback
+    import traceback, json, re
     from playwright.async_api import async_playwright
     from scrapers.freshmarket import AD_URL, OUT_PATH, _extract_deals_from_html
 
@@ -221,16 +223,13 @@ def scrape_freshmarket():
 
         html = ""
         js_items = []
+        captured_json = []  # network JSON payloads we’ll mine
 
         async with async_playwright() as p:
             browser = await p.chromium.launch(
                 headless=True,
                 executable_path=chromium_path,
-                args=[
-                    "--disable-blink-features=AutomationControlled",
-                    "--no-sandbox",
-                    "--disable-dev-shm-usage",
-                ],
+                args=["--disable-blink-features=AutomationControlled", "--no-sandbox", "--disable-dev-shm-usage"],
             )
             ctx = await browser.new_context(
                 user_agent=("Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) "
@@ -242,28 +241,28 @@ def scrape_freshmarket():
             page = await ctx.new_page()
             page.set_default_timeout(60000)
 
-            # Don’t use networkidle; these sites keep sockets open.
+            # Capture JSON responses while navigating
+            async def on_response(resp):
+                try:
+                    ct = resp.headers.get("content-type", "")
+                    url = resp.url
+                    if "application/json" in ct or url.endswith(".json") or "graphql" in url or "api" in url:
+                        data = await resp.json()
+                        captured_json.append({"url": url, "data": data})
+                except Exception:
+                    pass
+            page.on("response", on_response)
+
+            # Go (avoid networkidle)
             await page.goto(AD_URL, wait_until="domcontentloaded", timeout=60000)
 
-            # Try to nudge lazy content & close common banners
+            # Try common banners
             for sel in [
                 '#onetrust-accept-btn-handler',
                 'button:has-text("Accept")',
+                '[aria-label="Accept"]',
                 'button:has-text("Allow All")',
                 'button:has-text("I Agree")',
-                '[aria-label="Accept"]',
-            ]:
-                try:
-                    await page.locator(sel).first.click(timeout=1500)
-                    break
-                except Exception:
-                    pass
-            for sel in [
-                '[aria-label="Close"]',
-                'button[aria-label="Close"]',
-                'button:has-text("Close")',
-                '.modal [data-dismiss="modal"]',
-                '.mfp-close',
             ]:
                 try:
                     await page.locator(sel).first.click(timeout=1500)
@@ -271,77 +270,21 @@ def scrape_freshmarket():
                 except Exception:
                     pass
 
+            # Soft scroll to trigger lazy sections
             try:
-                await page.wait_for_timeout(800)
                 await page.evaluate("""
-                    const sleep = (ms)=>new Promise(r=>setTimeout(r,ms));
-                    (async () => {
-                      for (let y=0; y<=document.body.scrollHeight; y+=800) {
-                        window.scrollTo(0, y);
-                        await sleep(200);
-                      }
-                      window.scrollTo(0, document.body.scrollHeight);
-                    })();
+                  const sleep = ms => new Promise(r => setTimeout(r, ms));
+                  (async () => {
+                    for (let y = 0; y <= document.body.scrollHeight; y += 800) {
+                      window.scrollTo(0, y);
+                      await sleep(200);
+                    }
+                    window.scrollTo(0, document.body.scrollHeight);
+                  })();
                 """)
                 await page.wait_for_timeout(1200)
             except Exception:
                 pass
-
-            # In-page extraction (may include items missing price)
-            js_items = await page.evaluate(r"""
-            () => {
-              const items = [];
-              const clean = s => (s || '').replace(/\s+/g,' ').replace(/\u00A0/g,' ').trim();
-              const firstMoney = txt => {
-                const m = (txt || '').match(/\$\s*\d+(?:\.\d{1,2})?/);
-                return m ? parseFloat(m[0].replace(/[^0-9.]/g,'')) : null;
-              };
-              const sizeFrom = txt => {
-                const hints = ['per lb','per-lb','lb','oz','dozen','each','ea','ct','pk','pack'];
-                const t = (txt || '').toLowerCase();
-                for (const h of hints) if (t.includes(h)) return h.replace('-','-');
-                return '';
-              };
-              const cards = new Set();
-              [
-                'article, li, .card, .c-card, .product, .product-card, .tile, .teaser, .feature, .grid__item',
-                '[class*="feature"] [class*="card"], [class*="weekly"] [class*="card"]'
-              ].forEach(sel => document.querySelectorAll(sel).forEach(n => cards.add(n)));
-
-              const pushMaybe = (title, explicitPrice, contextText) => {
-                const item = clean(title);
-                const price = typeof explicitPrice === 'number' ? explicitPrice : firstMoney(contextText);
-                if (!item || item.length < 3) return;
-                items.push({ item: item.slice(0,120), price, size_text: sizeFrom(contextText || item) });
-              };
-
-              for (const card of cards) {
-                const text = clean(card.textContent || '');
-                if (!/\$\s*\d/.test(text)) continue;
-                const titleEl = card.querySelector('h1,h2,h3,h4,.title,.card__title,.product__title,.teaser__title,strong');
-                const title = titleEl ? titleEl.textContent : text.split('$', 1)[0];
-                pushMaybe(title, null, text);
-              }
-
-              const priceNodes = Array.from(document.querySelectorAll('[class*="price"], .price, [data-price]'));
-              for (const n of priceNodes) {
-                const p = firstMoney(n.textContent);
-                if (p == null) continue;
-                let container = n;
-                for (let i=0; i<4 && container && container.parentElement; i++) {
-                  container = container.parentElement;
-                  const tEl = container.querySelector('h1,h2,h3,h4,.title,.card__title,.product__title,.teaser__title,strong');
-                  if (tEl) { pushMaybe(tEl.textContent, p, container.textContent); break; }
-                }
-              }
-
-              const seen = new Set();
-              return items.filter(x => {
-                const key = (x.item || '').toLowerCase() + '|' + (x.price ?? 'none');
-                if (seen.has(key)) return false; seen.add(key); return true;
-              });
-            }
-            """)
 
             # Save artifacts
             html = await page.content()
@@ -351,37 +294,86 @@ def scrape_freshmarket():
 
             await ctx.close(); await browser.close()
 
-        # Prefer JS results; skip items with missing/invalid price; else fallback to soup
+        # ---------- Pull items from captured JSON / embedded JSON ----------
         from datetime import datetime, timedelta
         now = datetime.utcnow()
-        items = []
+        items: list[dict] = []
 
-        if js_items:
-            for i in js_items:
-                price_raw = i.get("price")
-                try:
-                    price_val = float(price_raw) if price_raw is not None else None
-                except Exception:
-                    price_val = None
-                if price_val is None:
-                    continue  # drop items w/o usable price
+        def add_item(name, price, size_text=""):
+            try:
+                price_val = float(price)
+            except Exception:
+                return
+            if not name or len(name.strip()) < 3:
+                return
+            items.append({
+                "store_id": "fresh-market-24503",
+                "item": name.strip()[:120],
+                "size_text": (size_text or "").strip(),
+                "price": price_val,
+                "unit_qty": None,
+                "unit": None,
+                "start_date": now.date().isoformat(),
+                "end_date": (now + timedelta(days=7)).date().isoformat(),
+                "promo_text": "Weekly Features",
+                "source": AD_URL,
+                "fetched_at": now.isoformat() + "Z",
+            })
 
-                items.append({
-                    "store_id": "fresh-market-24503",
-                    "item": (i.get("item") or "")[:120],
-                    "size_text": i.get("size_text") or "",
-                    "price": price_val,
-                    "unit_qty": None,
-                    "unit": None,
-                    "start_date": now.date().isoformat(),
-                    "end_date": (now + timedelta(days=7)).date().isoformat(),
-                    "promo_text": "Weekly Features",
-                    "source": AD_URL,
-                    "fetched_at": now.isoformat() + "Z",
-                })
+        # A) Mine captured JSON responses
+        def walk(obj, path=""):
+            if isinstance(obj, dict):
+                # Heuristic: a dict with name/title & price fields
+                keys = set(k.lower() for k in obj.keys())
+                cand_name = obj.get("name") or obj.get("title") or obj.get("headline")
+                cand_price = obj.get("price") or obj.get("salePrice") or obj.get("sale_price") or obj.get("amount") or obj.get("value")
+                if cand_name and (cand_price is not None):
+                    add_item(str(cand_name), cand_price, obj.get("unit") or obj.get("uom") or obj.get("size"))
+                # Recurse
+                for k, v in obj.items():
+                    walk(v, f"{path}.{k}" if path else k)
+            elif isinstance(obj, list):
+                for i, v in enumerate(obj):
+                    walk(v, f"{path}[{i}]")
+
+        for blob in captured_json:
+            walk(blob["data"])
+
+        # B) Mine embedded JSON from HTML: __NEXT_DATA__, __NUXT__, ld+json
         if not items:
-            # Fallback to soup parser from scrapers/freshmarket.py
-            items = _extract_deals_from_html((DATA_DIR / "debug_freshmarket.html").read_text(encoding="utf-8"))
+            try:
+                import re, json
+                embedded = []
+                for m in re.finditer(r'<script[^>]+type=["\']application/ld\+json["\'][^>]*>(.*?)</script>', html, re.S|re.I):
+                    try:
+                        embedded.append(json.loads(m.group(1)))
+                    except Exception:
+                        pass
+                # NEXT_DATA / NUXT state
+                for m in re.finditer(r'>(?:window\.__NEXT_DATA__|window\.__NUXT__)\s*=\s*(\{.*?\});?\s*<', html, re.S):
+                    try:
+                        embedded.append(json.loads(m.group(1)))
+                    except Exception:
+                        pass
+                for root in embedded:
+                    walk(root)
+            except Exception:
+                pass
+
+        # C) Fallback to your heuristic HTML parser
+        if not items:
+            items = _extract_deals_from_html(html or "")
+
+        # Deduplicate (name|price)
+        seen = set()
+        deduped = []
+        for it in items:
+            key = (it["item"].lower(), it["price"])
+            if key in seen:
+                continue
+            seen.add(key)
+            deduped.append(it)
+        items = deduped
 
         # Save JSON
         OUT_PATH.parent.mkdir(parents=True, exist_ok=True)
@@ -391,7 +383,7 @@ def scrape_freshmarket():
         return {
             "ok": True,
             "saved_items": len(items),
-            "js_extracted": bool(js_items),
+            "captured_json_count": len(captured_json),
             "saved_html": str(DATA_DIR / "debug_freshmarket.html"),
             "saved_png": str(DATA_DIR / "debug_freshmarket.png"),
             "saved_json": str(OUT_PATH),

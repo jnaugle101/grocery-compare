@@ -387,45 +387,61 @@ def scrape_freshmarket():
 
         def walk(obj):
             if isinstance(obj, dict):
-                # collect candidates
-                name = obj.get("name") or obj.get("title") or obj.get("headline") or obj.get("productName")
-                # Various price shapes we’ve seen in the wild:
+                # --- candidate name fields (keep this list generous) ---
+                name = (
+                        obj.get("name") or obj.get("title") or obj.get("headline")
+                        or obj.get("productName") or obj.get("description")
+                        or obj.get("primaryText") or obj.get("tileHeadline")
+                        or obj.get("eyebrow")  # sometimes the 'headline' is here + price in copy
+                )
+
+                # --- candidate numeric/explicit price fields ---
                 cand_prices = [
-                    obj.get("price"),
-                    obj.get("salePrice"),
-                    obj.get("sale_price"),
-                    obj.get("priceValue"),
-                    obj.get("priceText"),
-                    obj.get("amount"),
-                    obj.get("value"),
-                    obj.get("regularPrice"),
-                    obj.get("finalPrice"),
+                    obj.get("price"), obj.get("salePrice"), obj.get("sale_price"),
+                    obj.get("priceValue"), obj.get("priceText"), obj.get("formattedPrice"),
+                    obj.get("amount"), obj.get("value"), obj.get("regularPrice"),
+                    obj.get("finalPrice"), obj.get("wasPrice"), obj.get("nowPrice"),
+                    obj.get("currentPrice"), obj.get("pricePerPound"), obj.get("price_per"),
+                    obj.get("tilePrice"), obj.get("priceString"),
                 ]
 
-                # Nested price objects (e.g., {"price":{"amount": 5.99, "currency":"USD"}})
-                if isinstance(obj.get("price"), dict):
-                    cand_prices.append(obj["price"].get("amount") or obj["price"].get("value"))
+                # nested price object(s)
+                p = obj.get("price")
+                if isinstance(p, dict):
+                    cand_prices += [p.get("amount"), p.get("value"), p.get("current"), p.get("sale")]
 
-                # unit / size text
-                size_text = obj.get("unit") or obj.get("uom") or obj.get("size") or obj.get("sizeText")
+                # --- if no explicit price fields, try parsing price from text-y fields ---
+                text_fields = [
+                    obj.get("copy"), obj.get("body"), obj.get("text"),
+                    obj.get("subtitle"), obj.get("blurb"), obj.get("richText"),
+                    obj.get("html"), obj.get("content"), obj.get("secondaryText"),
+                    obj.get("tileSubheadline"), obj.get("tileCopy"),
+                ]
+                for tf in text_fields:
+                    parsed = _parse_money_any(tf)
+                    if parsed is not None:
+                        cand_prices.append(parsed)
 
-                # add if we have both
+                # --- unit/size hints ---
+                size_text = (
+                        obj.get("unit") or obj.get("uom") or obj.get("size") or obj.get("sizeText")
+                        or obj.get("unitOfMeasure") or obj.get("unitText") or obj.get("priceUnit")
+                )
+
+                # add all (name, price) combos we can parse
                 if name and any(cp is not None for cp in cand_prices):
                     for cp in cand_prices:
                         if cp is None:
                             continue
                         _add_item(items_from_json, name, cp, size_text)
 
-                # Recurse
+                # recurse
                 for v in obj.values():
                     walk(v)
 
             elif isinstance(obj, list):
                 for v in obj:
                     walk(v)
-
-        for blob in captured_json:
-            walk(blob["data"])
 
         # Mine embedded JSON from HTML: Product/Offer + NEXT/NUXT
         if not items_from_json:

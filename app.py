@@ -71,6 +71,28 @@ def debug_playwright():
         return asyncio.run(probe())
     except Exception as e:
         return {"ok": False, "where": "run", "error": str(e)}, 500
+@app.get("/debug/freshmarket_captured")
+def debug_freshmarket_captured():
+    p = DATA_DIR / "freshmarket_responses.json"
+    if not p.exists():
+        return {"ok": False, "error": "No captured JSON yet. Run /scrape/freshmarket first."}, 404
+    try:
+        blobs = json.loads(p.read_text(encoding="utf-8"))
+    except Exception as e:
+        return {"ok": False, "error": f"read/parse error: {e}"}, 500
+
+    # summarize urls and top-level keys to see the shapes quickly
+    summary = []
+    for b in blobs[:25]:  # limit to first 25 for brevity
+        data = b.get("data")
+        top_type = type(data).__name__
+        top_keys = list(data.keys())[:10] if isinstance(data, dict) else None
+        summary.append({
+            "url": b.get("url"),
+            "type": top_type,
+            "top_keys": top_keys,
+        })
+    return {"ok": True, "count": len(blobs), "summary": summary}
 
 # -------------------- basics --------------------
 @app.get("/health")
@@ -208,8 +230,6 @@ def scrape_foodlion():
         return {"ok": False, "error": err}, 500
 
 # -------------------- scrape: Fresh Market --------------------
-# --- paste over your existing /scrape/freshmarket route in app.py ---
-
 @app.route("/scrape/freshmarket", methods=["POST", "GET"])
 def scrape_freshmarket():
     import traceback, json, re
@@ -222,8 +242,7 @@ def scrape_freshmarket():
             return {"ok": False, "error": "Chromium not found on server."}
 
         html = ""
-        js_items = []
-        captured_json = []  # network JSON payloads we’ll mine
+        captured_json = []  # network JSON payloads
 
         async with async_playwright() as p:
             browser = await p.chromium.launch(
@@ -244,16 +263,15 @@ def scrape_freshmarket():
             # Capture JSON responses while navigating
             async def on_response(resp):
                 try:
-                    ct = resp.headers.get("content-type", "")
+                    ct = (resp.headers.get("content-type") or "").lower()
                     url = resp.url
-                    if "application/json" in ct or url.endswith(".json") or "graphql" in url or "api" in url:
+                    if "application/json" in ct or url.endswith(".json") or "graphql" in url or "/api/" in url:
                         data = await resp.json()
                         captured_json.append({"url": url, "data": data})
                 except Exception:
                     pass
             page.on("response", on_response)
 
-            # Go (avoid networkidle)
             await page.goto(AD_URL, wait_until="domcontentloaded", timeout=60000)
 
             # Try common banners
@@ -292,25 +310,69 @@ def scrape_freshmarket():
             (DATA_DIR / "debug_freshmarket.html").write_text(html or "", encoding="utf-8")
             await page.screenshot(path=str(DATA_DIR / "debug_freshmarket.png"), full_page=True)
 
+            # Also persist captured JSON for debugging/incremental tuning
+            (DATA_DIR / "freshmarket_responses.json").write_text(
+                json.dumps(captured_json, ensure_ascii=False, indent=2),
+                encoding="utf-8"
+            )
+
             await ctx.close(); await browser.close()
 
-        # ---------- Pull items from captured JSON / embedded JSON ----------
+        # ---------- Extraction pipeline ----------
         from datetime import datetime, timedelta
         now = datetime.utcnow()
-        items: list[dict] = []
 
-        def add_item(name, price, size_text=""):
-            try:
-                price_val = float(price)
-            except Exception:
+        def _parse_money_any(val):
+            """
+            Accept numbers, '$5.99', '99¢', '2 for $5', '2/$5', etc.
+            Returns float or None.
+            """
+            if val is None:
+                return None
+            if isinstance(val, (int, float)):
+                try:
+                    return float(val)
+                except Exception:
+                    return None
+
+            s = str(val).replace("\u00a0", " ").strip()
+
+            # 2 for $5 / 2/$5
+            m = re.search(r"(\d+)\s*(?:for|/)\s*\$?\s*([0-9]+(?:\.[0-9]{1,2})?)", s, re.I)
+            if m:
+                qty = int(m.group(1))
+                total = float(m.group(2))
+                if qty > 0:
+                    return round(total / qty, 2)
+
+            # $5.99 / 5.99
+            m = re.search(r"\$?\s*([0-9]+(?:\.[0-9]{1,2})?)", s)
+            if m:
+                try:
+                    return float(m.group(1))
+                except Exception:
+                    pass
+
+            # 99¢
+            m = re.search(r"([0-9]+)\s*¢", s)
+            if m:
+                try:
+                    return float(m.group(1)) / 100.0
+                except Exception:
+                    return None
+            return None
+
+        def _add_item(items_list, name, price, size_text=""):
+            price_val = _parse_money_any(price)
+            if price_val is None:
                 return
-            if not name or len(name.strip()) < 3:
+            if not name or len(str(name).strip()) < 3:
                 return
-            items.append({
+            items_list.append({
                 "store_id": "fresh-market-24503",
-                "item": name.strip()[:120],
+                "item": str(name).strip()[:120],
                 "size_text": (size_text or "").strip(),
-                "price": price_val,
+                "price": float(price_val),
                 "unit_qty": None,
                 "unit": None,
                 "start_date": now.date().isoformat(),
@@ -320,55 +382,95 @@ def scrape_freshmarket():
                 "fetched_at": now.isoformat() + "Z",
             })
 
-        # A) Mine captured JSON responses
-        def walk(obj, path=""):
+        # Walk arbitrary JSON and try common shapes
+        items_from_json: list[dict] = []
+
+        def walk(obj):
             if isinstance(obj, dict):
-                # Heuristic: a dict with name/title & price fields
-                keys = set(k.lower() for k in obj.keys())
-                cand_name = obj.get("name") or obj.get("title") or obj.get("headline")
-                cand_price = obj.get("price") or obj.get("salePrice") or obj.get("sale_price") or obj.get("amount") or obj.get("value")
-                if cand_name and (cand_price is not None):
-                    add_item(str(cand_name), cand_price, obj.get("unit") or obj.get("uom") or obj.get("size"))
+                # collect candidates
+                name = obj.get("name") or obj.get("title") or obj.get("headline") or obj.get("productName")
+                # Various price shapes we’ve seen in the wild:
+                cand_prices = [
+                    obj.get("price"),
+                    obj.get("salePrice"),
+                    obj.get("sale_price"),
+                    obj.get("priceValue"),
+                    obj.get("priceText"),
+                    obj.get("amount"),
+                    obj.get("value"),
+                    obj.get("regularPrice"),
+                    obj.get("finalPrice"),
+                ]
+
+                # Nested price objects (e.g., {"price":{"amount": 5.99, "currency":"USD"}})
+                if isinstance(obj.get("price"), dict):
+                    cand_prices.append(obj["price"].get("amount") or obj["price"].get("value"))
+
+                # unit / size text
+                size_text = obj.get("unit") or obj.get("uom") or obj.get("size") or obj.get("sizeText")
+
+                # add if we have both
+                if name and any(cp is not None for cp in cand_prices):
+                    for cp in cand_prices:
+                        if cp is None:
+                            continue
+                        _add_item(items_from_json, name, cp, size_text)
+
                 # Recurse
-                for k, v in obj.items():
-                    walk(v, f"{path}.{k}" if path else k)
+                for v in obj.values():
+                    walk(v)
+
             elif isinstance(obj, list):
-                for i, v in enumerate(obj):
-                    walk(v, f"{path}[{i}]")
+                for v in obj:
+                    walk(v)
 
         for blob in captured_json:
             walk(blob["data"])
 
-        # B) Mine embedded JSON from HTML: __NEXT_DATA__, __NUXT__, ld+json
-        if not items:
+        # Mine embedded JSON from HTML: Product/Offer + NEXT/NUXT
+        if not items_from_json:
             try:
-                import re, json
                 embedded = []
                 for m in re.finditer(r'<script[^>]+type=["\']application/ld\+json["\'][^>]*>(.*?)</script>', html, re.S|re.I):
                     try:
                         embedded.append(json.loads(m.group(1)))
                     except Exception:
                         pass
-                # NEXT_DATA / NUXT state
                 for m in re.finditer(r'>(?:window\.__NEXT_DATA__|window\.__NUXT__)\s*=\s*(\{.*?\});?\s*<', html, re.S):
                     try:
                         embedded.append(json.loads(m.group(1)))
                     except Exception:
                         pass
+
+                def harvest_ldjson(node):
+                    if isinstance(node, dict):
+                        if node.get("@type") == "Product":
+                            nm = node.get("name") or node.get("description")
+                            offers = node.get("offers")
+                            if isinstance(offers, dict):
+                                _add_item(items_from_json, nm, offers.get("price"), offers.get("priceCurrency"))
+                            elif isinstance(offers, list):
+                                for o in offers:
+                                    _add_item(items_from_json, nm, (o or {}).get("price"), (o or {}).get("priceCurrency"))
+                        for v in node.values():
+                            harvest_ldjson(v)
+                    elif isinstance(node, list):
+                        for v in node:
+                            harvest_ldjson(v)
+
                 for root in embedded:
-                    walk(root)
+                    harvest_ldjson(root)
             except Exception:
                 pass
 
-        # C) Fallback to your heuristic HTML parser
-        if not items:
-            items = _extract_deals_from_html(html or "")
+        # Fallback: heuristic HTML parser
+        items = items_from_json if items_from_json else _extract_deals_from_html(html or "")
 
         # Deduplicate (name|price)
         seen = set()
         deduped = []
         for it in items:
-            key = (it["item"].lower(), it["price"])
+            key = (it["item"].lower(), float(it["price"]))
             if key in seen:
                 continue
             seen.add(key)
@@ -387,6 +489,7 @@ def scrape_freshmarket():
             "saved_html": str(DATA_DIR / "debug_freshmarket.html"),
             "saved_png": str(DATA_DIR / "debug_freshmarket.png"),
             "saved_json": str(OUT_PATH),
+            "saved_captured_json": str(DATA_DIR / "freshmarket_responses.json"),
         }
 
     try:

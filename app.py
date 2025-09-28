@@ -555,6 +555,210 @@ def scrape_freshmarket():
         (DATA_DIR / "freshmarket_error.txt").write_text(err, encoding="utf-8")
         return {"ok": False, "error": err}, 500
 
+# -------------------- simple UI --------------------
+from flask import render_template_string
+
+@app.get("/app")
+def app_ui():
+    return render_template_string("""
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width,initial-scale=1" />
+  <title>Grocery Compare – UI</title>
+  <style>
+    :root { font-family: system-ui, -apple-system, Segoe UI, Roboto, sans-serif; }
+    body { margin: 0; background:#0b1020; color:#eef2ff; }
+    .wrap { max-width: 1100px; margin: 0 auto; padding: 28px 16px 56px; }
+    h1 { margin: 0 0 8px; font-size: 28px; }
+    .card { background:#121934; border:1px solid #1e2a57; border-radius:14px; padding:16px; margin:16px 0; }
+    .row { display:flex; gap:12px; flex-wrap:wrap; }
+    input[type="text"] { flex:1 1 420px; padding:12px; border-radius:10px; border:1px solid #24346a; background:#0f1731; color:#eef2ff; }
+    button { padding:12px 14px; border-radius:10px; border:1px solid #334a9b; background:#1a2a66; color:#eaf; cursor:pointer; }
+    button:hover { filter:brightness(1.05); }
+    .muted { color:#98a2ff; font-size: 13px; }
+    table { width:100%; border-collapse: collapse; margin-top: 12px; }
+    th, td { padding:10px; border-bottom:1px solid #223068; text-align:left; }
+    th { background:#15204b; position:sticky; top:0; }
+    .tag { font-size: 12px; color:#a9b4ff; background:#182353; border:1px solid #2a3f8b; padding:2px 8px; border-radius: 999px; }
+    .grid2 { display:grid; grid-template-columns: 1fr 340px; gap:16px; }
+    @media (max-width: 900px){ .grid2 { grid-template-columns: 1fr; } }
+    .small { font-size:12px; color:#b8c1ff; }
+    .ok { color:#8ef5b2; }
+    .warn { color:#ffd27c; }
+    .err { color:#ff9ba1; }
+    .mono { font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace; font-size: 12px; }
+  </style>
+</head>
+<body>
+  <div class="wrap">
+    <h1>Grocery Compare – UI</h1>
+    <div class="muted">Enter items (comma-separated), then Compare. You can also view scraped deals.</div>
+
+    <div class="grid2">
+      <div>
+        <div class="card">
+          <div class="row">
+            <input id="items" type="text" placeholder="e.g. chicken breast, eggs, milk, bananas" />
+            <button id="btnCompare">Compare</button>
+            <button id="btnSample" title="Fill sample items">Sample</button>
+          </div>
+          <div id="compareStatus" class="small" style="margin-top:8px;"></div>
+          <div id="compareResults" style="margin-top:10px; overflow:auto; max-height: 50vh;"></div>
+        </div>
+
+        <div class="card">
+          <div class="row">
+            <button id="btnDeals">Load Deals</button>
+            <span class="small">Shows what your API currently returns from <span class="mono">/deals</span>.</span>
+          </div>
+          <div id="dealsStatus" class="small" style="margin-top:8px;"></div>
+          <div id="dealsTable" style="margin-top:10px; overflow:auto; max-height: 50vh;"></div>
+        </div>
+      </div>
+
+      <div>
+        <div class="card">
+          <div class="small">Helpful</div>
+          <ul class="small">
+            <li><a href="/health" target="_blank">/health</a></li>
+            <li><a href="/routes" target="_blank">/routes</a></li>
+            <li><a href="/debug/freshmarket" target="_blank">/debug/freshmarket</a></li>
+            <li><a href="/debug/freshmarket.png" target="_blank">/debug/freshmarket.png</a></li>
+            <li><a href="/debug/freshmarket_captured" target="_blank">/debug/freshmarket_captured</a></li>
+          </ul>
+          <div class="small" style="margin-top:8px;">Scrapers (use POST):</div>
+          <ul class="small">
+            <li><span class="mono">POST /scrape/foodlion</span></li>
+            <li><span class="mono">POST /scrape/freshmarket</span></li>
+          </ul>
+        </div>
+
+        <div class="card">
+          <div class="small">Status</div>
+          <div id="health" class="small mono" style="margin-top:8px;">Checking…</div>
+        </div>
+      </div>
+    </div>
+  </div>
+
+<script>
+const el = (id) => document.getElementById(id);
+
+async function checkHealth(){
+  try {
+    const r = await fetch('/health');
+    const j = await r.json();
+    el('health').innerHTML = j.ok ? 'ok: true' : JSON.stringify(j);
+    el('health').className = 'small mono ' + (j.ok ? 'ok' : 'err');
+  } catch (e){
+    el('health').textContent = 'error: ' + e;
+    el('health').className = 'small mono err';
+  }
+}
+
+function renderCompare(res){
+  if (res.error){
+    return `<div class="err mono">Error: ${res.error}</div>`;
+  }
+  const picks = res.picks || [];
+  const rows = picks.map(p => `
+    <tr>
+      <td>${p.item}</td>
+      <td class="mono">${p.store_id}</td>
+      <td class="mono">${p.size_text || ''}</td>
+      <td class="mono">$${(p.price ?? '').toFixed ? p.price.toFixed(2) : p.price}</td>
+      <td class="mono">${p.unit_qty ?? ''} ${p.unit ?? ''}</td>
+      <td class="mono">${p.unit_price != null ? '$' + Number(p.unit_price).toFixed(4) : ''}</td>
+    </tr>`).join('');
+  const byStore = res.by_store || {};
+  const storeList = Object.entries(byStore).map(([sid, info]) =>
+    `<div class="tag">${sid} • $${(info.subtotal ?? 0).toFixed(2)} • ${info.items?.length||0} item(s)</div>`
+  ).join(' ');
+
+  return `
+    <div class="small">Requested: <span class="mono">${(res.requested_items||[]).join(', ')}</span></div>
+    <div class="small" style="margin-top:6px;">Stores: ${storeList || '<span class="muted">none</span>'}</div>
+    <div style="overflow:auto; max-height: 44vh; margin-top:10px;">
+      <table>
+        <thead>
+          <tr><th>Item</th><th>Store</th><th>Size</th><th>Price</th><th>Unit Qty</th><th>Unit Price</th></tr>
+        </thead>
+        <tbody>${rows || '<tr><td colspan="6" class="muted">No picks found.</td></tr>'}</tbody>
+      </table>
+    </div>
+    <div class="small" style="margin-top:10px;">Found: ${res.total_items_found || 0} • Estimated total:
+      <strong>$${(res.estimated_total || 0).toFixed(2)}</strong></div>
+  `;
+}
+
+function renderDeals(list){
+  if (!Array.isArray(list) || list.length === 0){
+    return '<div class="muted">No deals available yet.</div>';
+  }
+  const rows = list.map(d => `
+    <tr>
+      <td>${d.item}</td>
+      <td class="mono">${d.store_id}</td>
+      <td class="mono">$${(d.price ?? '').toFixed ? d.price.toFixed(2) : d.price}</td>
+      <td class="mono">${d.size_text || ''}</td>
+      <td class="mono">${d.unit_qty ?? ''} ${d.unit ?? ''}</td>
+      <td class="mono">${d.unit_price != null ? '$' + Number(d.unit_price).toFixed(4) : ''}</td>
+      <td class="mono">${d.start_date || ''} → ${d.end_date || ''}</td>
+    </tr>
+  `).join('');
+  return `
+    <div style="overflow:auto; max-height: 44vh;">
+      <table>
+        <thead>
+          <tr><th>Item</th><th>Store</th><th>Price</th><th>Size</th><th>Unit</th><th>Unit Price</th><th>Dates</th></tr>
+        </thead>
+        <tbody>${rows}</tbody>
+      </table>
+    </div>`;
+}
+
+el('btnSample').addEventListener('click', () => {
+  el('items').value = 'chicken breast, eggs, milk, bananas';
+  el('items').focus();
+});
+
+el('btnCompare').addEventListener('click', async () => {
+  const q = (el('items').value || '').trim();
+  if (!q){ el('compareStatus').textContent = 'Enter some items.'; return; }
+  el('compareStatus').textContent = 'Loading…';
+  el('compareResults').innerHTML = '';
+  try {
+    const r = await fetch('/compare?items=' + encodeURIComponent(q));
+    const j = await r.json();
+    el('compareStatus').textContent = '';
+    el('compareResults').innerHTML = renderCompare(j);
+  } catch (e){
+    el('compareStatus').textContent = 'Error: ' + e;
+  }
+});
+
+el('btnDeals').addEventListener('click', async () => {
+  el('dealsStatus').textContent = 'Loading…';
+  el('dealsTable').innerHTML = '';
+  try {
+    const r = await fetch('/deals');
+    const j = await r.json();
+    el('dealsStatus').textContent = '';
+    el('dealsTable').innerHTML = renderDeals(j);
+  } catch (e){
+    el('dealsStatus').textContent = 'Error: ' + e;
+  }
+});
+
+checkHealth();
+</script>
+</body>
+</html>
+""")
+
+
 # -------------------- main --------------------
 if __name__ == "__main__":
     app.run(debug=True)
